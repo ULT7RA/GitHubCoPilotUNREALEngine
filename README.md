@@ -22,6 +22,7 @@
 </p>
 
 ---
+[![Support on Patreon](https://img.shields.io/badge/Patreon-F96854?style=for-the-badge&logo=patreon&logoColor=white)](https://www.patreon.com/ULT7ROCK) Support is welcome. My 11 year old son and I do all our coding projects together and we need the Internet flowing and the Ramen noodle cups coming. And Milk, We Need Milk. Maybe a 2 Steks and a 2 potatos. T bone Steks. Wallmart frozen section.  
 
 A native Unreal Engine 5.x C++ editor plugin that brings GitHub Copilot directly into the Unreal Editor. Chat with AI models, read and edit source files, create C++ classes, trigger compiles, analyze your VR/Quest setup — all from a dockable Slate panel without ever leaving the engine.
 
