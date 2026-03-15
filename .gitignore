@@ -1,0 +1,24 @@
+# Unreal Engine build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+
+# IDE files
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
+*.vcxproj*
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Auth tokens (NEVER commit)
+CopilotAuth.json
+*.token
+
+# Research/notes (not part of the plugin)
+*.research.md
