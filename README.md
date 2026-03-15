@@ -31,8 +31,8 @@ This is **not** a mock chat panel. The plugin features a full **agentic tool-cal
  Features
 
  Agentic AI Assistant
-- **Tool-calling loop** — the AI can chain multiple tool calls (read → analyze → edit → compile) in a single conversation turn
-- **10 built-in tools**: `read_file`, `write_file`, `edit_file`, `list_directory`, `search_files`, `get_project_structure`, `create_cpp_class`, `compile`, `get_file_info`, `delete_file`
+- Tool-calling loop — the AI can chain multiple tool calls (read → analyze → edit → compile) in a single conversation turn
+- 10 built-in tools: `read_file`, `write_file`, `edit_file`, `list_directory`, `search_files`, `get_project_structure`, `create_cpp_class`, `compile`, `get_file_info`, `delete_file`
 - Automatic file backups before any write operation
 - Safety-enforced write roots — the AI can only modify files within approved directories
 
@@ -81,12 +81,12 @@ Copilot /help              Show all commands
 
 | Requirement | Details |
 |-------------|---------|
-| Unreal Engine | 5.3 or later (tested on 5.4 and 5.5) |
+| Unreal Engine | 5.3 or later (tested on 5.4 and 5.7) |
 | Platform | Windows (macOS/Linux should compile but are untested) |
 | GitHub Copilot | Active subscription — Individual, Business, or Enterprise |
 | Compiler | Visual Studio 2022 or compatible (for editor module) |
 
-> Note: This plugin uses the **GitHub Copilot API** with OAuth device-flow authentication. You do **not** need a separate API key or PAT — the plugin handles authentication automatically, the same way VS Code does.
+> Note: This plugin uses the GitHub Copilot API with OAuth device-flow authentication. You do not need a separate API key or PAT — the plugin handles authentication automatically, the same way VS Code does.
 
 ---
 
