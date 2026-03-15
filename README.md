@@ -28,15 +28,15 @@ A native Unreal Engine 5.x C++ editor plugin that brings GitHub Copilot directly
 
 This is **not** a mock chat panel. The plugin features a full **agentic tool-calling system** — the AI can autonomously read files, write code, search your project, create classes, and compile, just like Copilot in VS Code.
 
-## Features
+ Features
 
-### 🤖 Agentic AI Assistant
+ Agentic AI Assistant
 - **Tool-calling loop** — the AI can chain multiple tool calls (read → analyze → edit → compile) in a single conversation turn
 - **10 built-in tools**: `read_file`, `write_file`, `edit_file`, `list_directory`, `search_files`, `get_project_structure`, `create_cpp_class`, `compile`, `get_file_info`, `delete_file`
 - Automatic file backups before any write operation
 - Safety-enforced write roots — the AI can only modify files within approved directories
 
-### 💬 Native Editor Panel
+ Native Editor Panel
 - Dockable Slate tab: **Window → GitHub Copilot**
 - Real-time project context (project name, engine version, current map, selected assets/actors)
 - VR/Quest/OpenXR readiness summary
@@ -45,27 +45,27 @@ This is **not** a mock chat panel. The plugin features a full **agentic tool-cal
 - Diff preview area for code changes
 - Execution log
 
-### 🔧 Editor Integration
+ Editor Integration
 - **Compile & Live Coding** — trigger Hot Reload or Live Coding from the AI panel
 - **Content Browser awareness** — selected assets are included in context
 - **Level Editor awareness** — selected actors are included in context
 - **Asset Registry** — create folders, refresh state after file changes
 - **Automation Tests** — run tests from the panel
 
-### 🥽 Meta Quest / XR Support
+ Meta Quest / XR Support
 - Detects OpenXR, MetaXR, OculusXR plugin status
 - Scans for VR-relevant actors (MotionController, XROrigin, HMD)
 - Android manifest & Quest readiness audit
 - Dedicated "Analyze VR Setup" and "Analyze Quest Readiness" commands
 
-### 🔌 Multi-Model Support
+ Multi-Model Support
 - Works with **any model** available on your GitHub Copilot subscription
 - Claude (Opus, Sonnet, Haiku), GPT-4o, GPT-4.1, o1, o3, Gemini, and more
 - Dynamic model catalog fetched from the Copilot API at startup
 - Switch models at any time with `/model <name>`
 - Per-model endpoint routing (chat/completions vs. responses)
 
-### 📟 Console Commands
+Console Commands
 Use the plugin from the UE console (`~` key) without opening the panel:
 ```
 Copilot <prompt>          Chat with the AI
@@ -77,29 +77,29 @@ Copilot /help              Show all commands
 
 ---
 
-## Requirements
+ Requirements
 
 | Requirement | Details |
 |-------------|---------|
-| **Unreal Engine** | 5.3 or later (tested on 5.4 and 5.5) |
-| **Platform** | Windows (macOS/Linux should compile but are untested) |
-| **GitHub Copilot** | Active subscription — Individual, Business, or Enterprise |
-| **Compiler** | Visual Studio 2022 or compatible (for editor module) |
+| Unreal Engine | 5.3 or later (tested on 5.4 and 5.5) |
+| Platform | Windows (macOS/Linux should compile but are untested) |
+| GitHub Copilot | Active subscription — Individual, Business, or Enterprise |
+| Compiler | Visual Studio 2022 or compatible (for editor module) |
 
-> **Note:** This plugin uses the **GitHub Copilot API** with OAuth device-flow authentication. You do **not** need a separate API key or PAT — the plugin handles authentication automatically, the same way VS Code does.
+> Note: This plugin uses the **GitHub Copilot API** with OAuth device-flow authentication. You do **not** need a separate API key or PAT — the plugin handles authentication automatically, the same way VS Code does.
 
 ---
 
-## Installation
+ Installation
 
-### Option A: Clone into your project (recommended)
+ Option A: Clone into your project (recommended)
 
 ```bash
 cd "YourProject/Plugins"
 git clone https://github.com/YOUR_USERNAME/GitHubCopilotUE.git
 ```
 
-### Option B: Download and copy
+ Option B: Download and copy
 
 1. Download the latest release or clone this repo
 2. Copy the `GitHubCopilotUE` folder into your project's `Plugins/` directory
@@ -118,7 +118,7 @@ YourProject/
 └── YourProject.uproject
 ```
 
-### Option C: Engine-level plugin
+ Option C: Engine-level plugin
 
 Copy to `Engine/Plugins/Marketplace/GitHubCopilotUE/` to make it available across all projects.
 
@@ -131,7 +131,7 @@ Copy to `Engine/Plugins/Marketplace/GitHubCopilotUE/` to make it available acros
 
 ---
 
-## Authentication
+ Authentication
 
 The plugin uses GitHub's **OAuth Device Flow** — the same method VS Code uses. No tokens to manually create or paste.
 
@@ -143,7 +143,7 @@ The plugin uses GitHub's **OAuth Device Flow** — the same method VS Code uses.
 4. Enter the code in your browser and authorize
 5. The plugin will automatically detect authorization and fetch your Copilot token
 
-### How It Works
+ How It Works
 
 ```
 Plugin                      GitHub
@@ -163,7 +163,7 @@ Plugin                      GitHub
   └── Ready ✓                 │
 ```
 
-### Token Storage
+ Token Storage
 
 Tokens are cached locally at:
 ```
@@ -171,7 +171,7 @@ YourProject/Saved/CopilotAuth.json
 ```
 This file contains your GitHub access token, active model, and API endpoint. It is **not** committed to source control (add `Saved/` to `.gitignore`).
 
-### Subscription Detection
+ Subscription Detection
 
 The plugin automatically detects your subscription tier (Individual, Business, Enterprise) from the token exchange and routes API calls to the correct endpoint:
 - Individual → `api.individual.githubcopilot.com`
@@ -180,9 +180,9 @@ The plugin automatically detects your subscription tier (Individual, Business, E
 
 ---
 
-## Usage
+ Usage
 
-### Panel UI
+ Panel UI
 
 Open via **Window → GitHub Copilot**. The panel has:
 
@@ -197,7 +197,7 @@ Open via **Window → GitHub Copilot**. The panel has:
 | **Diff** | Code diff preview (collapsible) |
 | **Log** | Execution status messages |
 
-### Example Prompts
+ Example Prompts
 
 ```
 Read my GameMode.h and explain what it does
@@ -213,7 +213,7 @@ List all files in my Source directory
 What plugins are enabled in my project? Is it ready for Quest deployment?
 ```
 
-### Slash Commands
+Slash Commands
 
 | Command | Description |
 |---------|-------------|
@@ -226,7 +226,7 @@ What plugins are enabled in my project? Is it ready for Quest deployment?
 | `/clear` | Clear conversation history |
 | `/version` | Show plugin version |
 
-### Action Buttons
+ Action Buttons
 
 The panel includes 20+ action buttons grouped by category:
 
@@ -238,11 +238,11 @@ The panel includes 20+ action buttons grouped by category:
 
 ---
 
-## Models
+ Models
 
 The plugin supports **any model** available through your GitHub Copilot subscription. Available models are fetched dynamically at startup.
 
-### Common Models
+ Common Models
 
 | Model | ID | Notes |
 |-------|----|-------|
@@ -255,7 +255,7 @@ The plugin supports **any model** available through your GitHub Copilot subscrip
 
 > Model availability depends on your subscription tier and organization settings. Use `/models` to see what's available to you.
 
-### Switching Models
+ Switching Models
 
 From the panel or console:
 ```
@@ -266,11 +266,11 @@ The active model persists across editor sessions (saved in `CopilotAuth.json`).
 
 ---
 
-## Settings
+ Settings
 
 Go to **Edit → Project Settings → Plugins → GitHub Copilot UE**
 
-### Connection
+Connection
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Backend Type | `GitHubCopilot` | Backend service type |
@@ -278,35 +278,34 @@ Go to **Edit → Project Settings → Plugins → GitHub Copilot UE**
 | API Key | (empty) | Manual API key override (not needed for Copilot OAuth) |
 | Model Name | `claude-sonnet-4.5` | Default model |
 | Timeout (Seconds) | `60` | HTTP request timeout |
-
-### Logging
+ Logging
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Enable Verbose Logging | `false` | Show detailed debug logs in Output Log |
 
-### XR / Quest
+ XR / Quest
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Enable Quest Workflow Analysis | `true` | Include Quest readiness in context |
 | Enable OpenXR Context Collection | `true` | Detect OpenXR/MetaXR plugins |
 
-### Execution
+ Execution
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Require Patch Preview | `true` | Show diff preview before applying changes |
 
-### Safety
+ Safety
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Allowed Write Roots | `["Source", "Config", "Plugins"]` | Directories the AI is allowed to write to (relative to project root) |
 
-### Compile
+ Compile
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Enable Compile Commands | `true` | Allow AI to trigger compiles |
 | Enable Live Coding Commands | `true` | Allow AI to trigger Live Coding |
 
-### Context
+ Context
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Enable Blueprint Context Collection | `true` | Include Blueprint assets in context |
@@ -314,9 +313,9 @@ Go to **Edit → Project Settings → Plugins → GitHub Copilot UE**
 
 ---
 
-## Architecture
+ Architecture
 
-### Module Layout
+ Module Layout
 
 ```
 GitHubCopilotUE/
@@ -372,7 +371,7 @@ GitHubCopilotUE/
             └── GitHubCopilotUERuntimeModule.cpp
 ```
 
-### Service Architecture
+ Service Architecture
 
 | Service | Responsibility |
 |---------|---------------|
@@ -387,7 +386,7 @@ GitHubCopilotUE/
 | **ConsoleCommands** | `Copilot` console command registration and response display |
 | **SlashCommands** | `/model`, `/models`, `/context`, `/signin`, `/signout`, `/help`, `/clear`, `/version` |
 
-### Agentic Tool-Call Flow
+ Agentic Tool-Call Flow
 
 ```
 User: "Read my GameMode.h and add a Score variable"
@@ -414,32 +413,31 @@ User: "Read my GameMode.h and add a Score variable"
 The loop continues until the AI returns a text response with no further tool calls, or a safety limit is hit.
 
 ---
+ Troubleshooting
 
-## Troubleshooting
-
-### "Sign in required" / not connecting
+ "Sign in required" / not connecting
 - Make sure you have an active GitHub Copilot subscription
 - Try `/signout` then `/signin` to re-authenticate
 - Check Output Log (filter by `LogGitHubCopilotUE`) for detailed errors
 
-### Model returns errors
+ Model returns errors
 - Use `/models` to confirm the model is available on your subscription
 - Some models (e.g., Opus) may require a Business/Enterprise tier
 - Try switching to a different model: `/model gpt-4o`
 
-### Tool calls not working
+ Tool calls not working
 - Check that `Allowed Write Roots` in Project Settings includes the directories you expect
 - Ensure `Enable Compile Commands` is checked if you want the AI to compile
 - Check Output Log with verbose logging enabled for detailed tool execution traces
 
-### Plugin doesn't appear
+ Plugin doesn't appear
 - Ensure the folder structure is correct (`.uplugin` must be at the root of the plugin folder)
 - Check **Edit → Plugins** and search for "GitHub Copilot" — enable it if disabled
 - Delete `Binaries/` and `Intermediate/` inside the plugin folder and restart the editor to force recompile
 
 ---
 
-## Contributing
+ Contributing
 
 Contributions are welcome! This is an open-source project and we'd love your help.
 
@@ -449,22 +447,22 @@ Contributions are welcome! This is an open-source project and we'd love your hel
 4. Test in Unreal Editor
 5. Submit a Pull Request
 
-### Areas We'd Love Help With
-- **Streaming support** — SSE streaming for real-time response display
-- **macOS / Linux testing** — the plugin should compile cross-platform but is untested
-- **Blueprint integration** — deeper Blueprint asset inspection and manipulation
-- **Additional tools** — more agentic tools (rename symbol, refactor, etc.)
-- **UI polish** — Slate styling, icons, better diff rendering
-- **Context window management** — smart truncation of conversation history
+ Areas We'd Love Help With
+- Streaming support — SSE streaming for real-time response display
+- macOS / Linux testing — the plugin should compile cross-platform but is untested
+- Blueprint integration — deeper Blueprint asset inspection and manipulation
+- Additional tools — more agentic tools (rename symbol, refactor, etc.)
+- UI polish — Slate styling, icons, better diff rendering
+- Context window management — smart truncation of conversation history
 
 ---
 
-## License
+ License
 
 This project is open source. See [LICENSE](LICENSE) for details.
 
 ---
 
 <p align="center">
-  Built with ❤️ for the Unreal Engine community
+  Built with ❤️ for the Unreal Engine community --ULT7RA & RockasaurusRex
 </p>
