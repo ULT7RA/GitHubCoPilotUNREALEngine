@@ -7,6 +7,7 @@ public class GitHubCopilotUE : ModuleRules
 public GitHubCopilotUE(ReadOnlyTargetRules Target) : base(Target)
 {
 PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+PrecompileForTargets = PrecompileTargetsType.Editor;
 
 PublicDependencyModuleNames.AddRange(new string[]
 {

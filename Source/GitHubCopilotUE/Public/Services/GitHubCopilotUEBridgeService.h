@@ -83,6 +83,7 @@ enum class ECopilotAuthState : uint8
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnCopilotDeviceCode, const FString& /*UserCode*/, const FString& /*VerificationURI*/);
 DECLARE_MULTICAST_DELEGATE(FOnCopilotAuthComplete);
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnCopilotModelsLoaded, const TArray<FCopilotModel>& /*Models*/);
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnCopilotActiveModelChanged, const FString& /*ModelId*/);
 
 /**
  * Bridge service implementing real GitHub Copilot API integration.
@@ -159,6 +160,7 @@ public:
 	FOnCopilotDeviceCode OnDeviceCodeReceived;
 	FOnCopilotAuthComplete OnAuthComplete;
 	FOnCopilotModelsLoaded OnModelsLoaded;
+	FOnCopilotActiveModelChanged OnActiveModelChanged;
 
 private:
 	// === Auth flow internals ===
@@ -183,7 +185,7 @@ private:
 	void OnModelsResponse(FHttpRequestPtr HttpReq, FHttpResponsePtr HttpResp, bool bSuccess);
 
 	// === Chat ===
-	void SendChatCompletion(const FCopilotRequest& Request);
+	void SendChatCompletion(const FCopilotRequest& Request, bool bAllowToolCalls = true);
 	void OnChatCompletionResponse(FHttpRequestPtr HttpReq, FHttpResponsePtr HttpResp, bool bSuccess, FString RequestId);
 	FString BuildSystemPrompt(const FCopilotRequest& Request) const;
 	FString CommandTypeToString(ECopilotCommandType Type) const;
@@ -229,6 +231,7 @@ private:
 	TSharedPtr<FGitHubCopilotUEToolExecutor> ToolExecutor;
 	TMap<FString, TArray<TSharedPtr<FJsonValue>>> ActiveConversations; // RequestId -> messages array
 	TMap<FString, int32> ToolCallIterations; // RequestId -> iteration count (safety limit)
+	TSet<FString> ForcedFinalResponseRequestIds; // Requests that already switched to no-tool finalization
 
 	// Token persistence path
 	FString GetTokenCachePath() const;

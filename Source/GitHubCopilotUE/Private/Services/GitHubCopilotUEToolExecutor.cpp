@@ -11,6 +11,94 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "HAL/FileManager.h"
+#include "Editor.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet/BlueprintFunctionLibrary.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/Character.h"
+#include "Components/ActorComponent.h"
+#include "Components/SceneComponent.h"
+#include "Misc/PackageName.h"
+#include "UObject/Package.h"
+#include "UObject/SavePackage.h"
+
+namespace
+{
+	static FString SanitizeAssetName(const FString& InName)
+	{
+		FString Name = InName.TrimStartAndEnd();
+		Name.ReplaceInline(TEXT(" "), TEXT("_"));
+		for (int32 Index = 0; Index < Name.Len(); ++Index)
+		{
+			const TCHAR C = Name[Index];
+			if (!(FChar::IsAlnum(C) || C == TCHAR('_')))
+			{
+				Name[Index] = TCHAR('_');
+			}
+		}
+		return Name;
+	}
+
+	static UClass* ResolveParentClass(const FString& ParentClassInput)
+	{
+		const FString Parent = ParentClassInput.TrimStartAndEnd();
+		if (Parent.IsEmpty() || Parent.Equals(TEXT("Actor"), ESearchCase::IgnoreCase) || Parent.Equals(TEXT("AActor"), ESearchCase::IgnoreCase))
+		{
+			return AActor::StaticClass();
+		}
+		if (Parent.Equals(TEXT("Pawn"), ESearchCase::IgnoreCase) || Parent.Equals(TEXT("APawn"), ESearchCase::IgnoreCase))
+		{
+			return APawn::StaticClass();
+		}
+		if (Parent.Equals(TEXT("Character"), ESearchCase::IgnoreCase) || Parent.Equals(TEXT("ACharacter"), ESearchCase::IgnoreCase))
+		{
+			return ACharacter::StaticClass();
+		}
+		if (Parent.Equals(TEXT("ActorComponent"), ESearchCase::IgnoreCase) || Parent.Equals(TEXT("UActorComponent"), ESearchCase::IgnoreCase))
+		{
+			return UActorComponent::StaticClass();
+		}
+		if (Parent.Equals(TEXT("SceneComponent"), ESearchCase::IgnoreCase) || Parent.Equals(TEXT("USceneComponent"), ESearchCase::IgnoreCase))
+		{
+			return USceneComponent::StaticClass();
+		}
+		if (Parent.Equals(TEXT("FunctionLibrary"), ESearchCase::IgnoreCase) || Parent.Equals(TEXT("BlueprintFunctionLibrary"), ESearchCase::IgnoreCase) || Parent.Equals(TEXT("UBlueprintFunctionLibrary"), ESearchCase::IgnoreCase))
+		{
+			return UBlueprintFunctionLibrary::StaticClass();
+		}
+
+		if (Parent.StartsWith(TEXT("/Script/")))
+		{
+			if (UClass* LoadedClass = StaticLoadClass(UObject::StaticClass(), nullptr, *Parent))
+			{
+				return LoadedClass;
+			}
+		}
+
+		const TArray<FString> CandidatePaths = {
+			FString::Printf(TEXT("/Script/Engine.%s"), *Parent),
+			FString::Printf(TEXT("/Script/Engine.A%s"), *Parent),
+			FString::Printf(TEXT("/Script/Engine.U%s"), *Parent),
+			FString::Printf(TEXT("/Script/CoreUObject.%s"), *Parent),
+			FString::Printf(TEXT("/Script/CoreUObject.U%s"), *Parent)
+		};
+
+		for (const FString& Candidate : CandidatePaths)
+		{
+			if (UClass* LoadedClass = StaticLoadClass(UObject::StaticClass(), nullptr, *Candidate))
+			{
+				return LoadedClass;
+			}
+		}
+
+		return nullptr;
+	}
+}
 
 FGitHubCopilotUEToolExecutor::FGitHubCopilotUEToolExecutor()
 {
@@ -32,14 +120,30 @@ void FGitHubCopilotUEToolExecutor::Initialize(
 
 FString FGitHubCopilotUEToolExecutor::ExecuteTool(const FString& ToolName, const TSharedPtr<FJsonObject>& Arguments)
 {
+	if (!Arguments.IsValid())
+	{
+		return TEXT("Error: Tool arguments are missing");
+	}
+
+	// Copilot CLI style aliases
+	if (ToolName == TEXT("view"))                return Tool_ViewPath(Arguments);
+	if (ToolName == TEXT("glob"))                return Tool_GlobFiles(Arguments);
+	if (ToolName == TEXT("rg"))                  return Tool_SearchFiles(Arguments);
+
 	if (ToolName == TEXT("read_file"))           return Tool_ReadFile(Arguments);
 	if (ToolName == TEXT("write_file"))          return Tool_WriteFile(Arguments);
 	if (ToolName == TEXT("edit_file"))           return Tool_EditFile(Arguments);
 	if (ToolName == TEXT("list_directory"))      return Tool_ListDirectory(Arguments);
 	if (ToolName == TEXT("search_files"))        return Tool_SearchFiles(Arguments);
+	if (ToolName == TEXT("create_directory"))    return Tool_CreateDirectory(Arguments);
+	if (ToolName == TEXT("copy_file"))           return Tool_CopyFile(Arguments);
+	if (ToolName == TEXT("move_file"))           return Tool_MoveFile(Arguments);
 	if (ToolName == TEXT("get_project_structure")) return Tool_GetProjectStructure(Arguments);
 	if (ToolName == TEXT("create_cpp_class"))    return Tool_CreateCppClass(Arguments);
+	if (ToolName == TEXT("create_blueprint_asset")) return Tool_CreateBlueprintAsset(Arguments);
 	if (ToolName == TEXT("compile"))             return Tool_Compile(Arguments);
+	if (ToolName == TEXT("live_coding_patch"))   return Tool_LiveCodingPatch(Arguments);
+	if (ToolName == TEXT("run_automation_tests")) return Tool_RunAutomationTests(Arguments);
 	if (ToolName == TEXT("get_file_info"))       return Tool_GetFileInfo(Arguments);
 	if (ToolName == TEXT("delete_file"))         return Tool_DeleteFile(Arguments);
 
@@ -72,6 +176,104 @@ bool FGitHubCopilotUEToolExecutor::IsPathAllowed(const FString& FullPath) const
 	FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 	FString NormPath = FPaths::ConvertRelativePathToFull(FullPath);
 	return NormPath.StartsWith(ProjectDir);
+}
+
+// ============================================================================
+// Tool: view (Copilot CLI style)
+// ============================================================================
+
+FString FGitHubCopilotUEToolExecutor::Tool_ViewPath(const TSharedPtr<FJsonObject>& Args)
+{
+	FString Path;
+	if (!Args->TryGetStringField(TEXT("path"), Path) || Path.IsEmpty())
+	{
+		return TEXT("Error: 'path' is required");
+	}
+
+	const FString FullPath = ResolvePath(Path);
+	if (!IsPathAllowed(FullPath))
+	{
+		return FString::Printf(TEXT("Error: Path '%s' is outside the project directory"), *Path);
+	}
+
+	if (FPaths::DirectoryExists(FullPath))
+	{
+		TSharedPtr<FJsonObject> DirArgs = MakeShareable(new FJsonObject);
+		DirArgs->SetStringField(TEXT("path"), Path);
+		return Tool_ListDirectory(DirArgs);
+	}
+
+	if (FPaths::FileExists(FullPath))
+	{
+		return Tool_ReadFile(Args);
+	}
+
+	return FString::Printf(TEXT("Error: Path '%s' does not exist"), *Path);
+}
+
+// ============================================================================
+// Tool: glob (Copilot CLI style)
+// ============================================================================
+
+FString FGitHubCopilotUEToolExecutor::Tool_GlobFiles(const TSharedPtr<FJsonObject>& Args)
+{
+	FString Pattern;
+	if (!Args->TryGetStringField(TEXT("pattern"), Pattern) || Pattern.IsEmpty())
+	{
+		return TEXT("Error: 'pattern' is required");
+	}
+
+	FString Path = TEXT(".");
+	Args->TryGetStringField(TEXT("path"), Path);
+
+	int32 MaxResults = 500;
+	Args->TryGetNumberField(TEXT("max_results"), MaxResults);
+	MaxResults = FMath::Clamp(MaxResults, 1, 2000);
+
+	const FString FullPath = ResolvePath(Path);
+	if (!IsPathAllowed(FullPath))
+	{
+		return FString::Printf(TEXT("Error: Path '%s' is outside the project directory"), *Path);
+	}
+	if (!FPaths::DirectoryExists(FullPath))
+	{
+		return FString::Printf(TEXT("Error: Directory '%s' does not exist"), *Path);
+	}
+
+	FString NormalizedPattern = Pattern.TrimStartAndEnd();
+	NormalizedPattern.ReplaceInline(TEXT("\\"), TEXT("/"));
+
+	TArray<FString> AllFiles;
+	IFileManager::Get().FindFilesRecursive(AllFiles, *FullPath, TEXT("*"), true, false);
+	AllFiles.Sort();
+
+	const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	FString Result;
+	int32 MatchCount = 0;
+
+	for (const FString& FilePath : AllFiles)
+	{
+		FString RelativePath = FPaths::ConvertRelativePathToFull(FilePath);
+		RelativePath.RemoveFromStart(ProjectDir);
+		RelativePath.ReplaceInline(TEXT("\\"), TEXT("/"));
+
+		if (RelativePath.MatchesWildcard(NormalizedPattern, ESearchCase::IgnoreCase))
+		{
+			Result += RelativePath + TEXT("\n");
+			++MatchCount;
+			if (MatchCount >= MaxResults)
+			{
+				break;
+			}
+		}
+	}
+
+	if (MatchCount == 0)
+	{
+		return FString::Printf(TEXT("No files matched pattern '%s' in '%s'"), *Pattern, *Path);
+	}
+
+	return FString::Printf(TEXT("Matched %d path(s):\n%s"), MatchCount, *Result);
 }
 
 // ============================================================================
@@ -374,6 +576,136 @@ FString FGitHubCopilotUEToolExecutor::Tool_SearchFiles(const TSharedPtr<FJsonObj
 }
 
 // ============================================================================
+// Tool: create_directory
+// ============================================================================
+
+FString FGitHubCopilotUEToolExecutor::Tool_CreateDirectory(const TSharedPtr<FJsonObject>& Args)
+{
+	FString Path;
+	if (!Args->TryGetStringField(TEXT("path"), Path) || Path.IsEmpty())
+	{
+		return TEXT("Error: 'path' is required");
+	}
+
+	const FString FullPath = ResolvePath(Path);
+	if (!IsPathAllowed(FullPath))
+	{
+		return FString::Printf(TEXT("Error: Path '%s' is outside the project directory"), *Path);
+	}
+
+	if (FPaths::DirectoryExists(FullPath))
+	{
+		return FString::Printf(TEXT("Directory already exists: '%s'"), *Path);
+	}
+
+	if (IFileManager::Get().MakeDirectory(*FullPath, true))
+	{
+		return FString::Printf(TEXT("Created directory '%s'"), *Path);
+	}
+
+	return FString::Printf(TEXT("Error: Failed to create directory '%s'"), *Path);
+}
+
+// ============================================================================
+// Tool: copy_file
+// ============================================================================
+
+FString FGitHubCopilotUEToolExecutor::Tool_CopyFile(const TSharedPtr<FJsonObject>& Args)
+{
+	FString SourcePath;
+	FString DestinationPath;
+	if (!Args->TryGetStringField(TEXT("source_path"), SourcePath) || SourcePath.IsEmpty())
+	{
+		return TEXT("Error: 'source_path' is required");
+	}
+	if (!Args->TryGetStringField(TEXT("destination_path"), DestinationPath) || DestinationPath.IsEmpty())
+	{
+		return TEXT("Error: 'destination_path' is required");
+	}
+
+	const FString SourceFullPath = ResolvePath(SourcePath);
+	const FString DestinationFullPath = ResolvePath(DestinationPath);
+	if (!IsPathAllowed(SourceFullPath) || !IsPathAllowed(DestinationFullPath))
+	{
+		return TEXT("Error: Source or destination path is outside the project directory");
+	}
+	if (!FPaths::FileExists(SourceFullPath))
+	{
+		return FString::Printf(TEXT("Error: Source file '%s' does not exist"), *SourcePath);
+	}
+
+	bool bOverwrite = false;
+	Args->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+	if (!bOverwrite && FPaths::FileExists(DestinationFullPath))
+	{
+		return FString::Printf(TEXT("Error: Destination file '%s' already exists"), *DestinationPath);
+	}
+
+	const FString DestinationDir = FPaths::GetPath(DestinationFullPath);
+	if (!DestinationDir.IsEmpty())
+	{
+		IFileManager::Get().MakeDirectory(*DestinationDir, true);
+	}
+
+	const uint32 CopyResult = IFileManager::Get().Copy(*DestinationFullPath, *SourceFullPath, bOverwrite);
+	if (CopyResult == COPY_OK)
+	{
+		return FString::Printf(TEXT("Copied '%s' -> '%s'"), *SourcePath, *DestinationPath);
+	}
+
+	return FString::Printf(TEXT("Error: Failed to copy '%s' -> '%s'"), *SourcePath, *DestinationPath);
+}
+
+// ============================================================================
+// Tool: move_file
+// ============================================================================
+
+FString FGitHubCopilotUEToolExecutor::Tool_MoveFile(const TSharedPtr<FJsonObject>& Args)
+{
+	FString SourcePath;
+	FString DestinationPath;
+	if (!Args->TryGetStringField(TEXT("source_path"), SourcePath) || SourcePath.IsEmpty())
+	{
+		return TEXT("Error: 'source_path' is required");
+	}
+	if (!Args->TryGetStringField(TEXT("destination_path"), DestinationPath) || DestinationPath.IsEmpty())
+	{
+		return TEXT("Error: 'destination_path' is required");
+	}
+
+	const FString SourceFullPath = ResolvePath(SourcePath);
+	const FString DestinationFullPath = ResolvePath(DestinationPath);
+	if (!IsPathAllowed(SourceFullPath) || !IsPathAllowed(DestinationFullPath))
+	{
+		return TEXT("Error: Source or destination path is outside the project directory");
+	}
+	if (!FPaths::FileExists(SourceFullPath))
+	{
+		return FString::Printf(TEXT("Error: Source file '%s' does not exist"), *SourcePath);
+	}
+
+	bool bOverwrite = false;
+	Args->TryGetBoolField(TEXT("overwrite"), bOverwrite);
+	if (!bOverwrite && FPaths::FileExists(DestinationFullPath))
+	{
+		return FString::Printf(TEXT("Error: Destination file '%s' already exists"), *DestinationPath);
+	}
+
+	const FString DestinationDir = FPaths::GetPath(DestinationFullPath);
+	if (!DestinationDir.IsEmpty())
+	{
+		IFileManager::Get().MakeDirectory(*DestinationDir, true);
+	}
+
+	if (IFileManager::Get().Move(*DestinationFullPath, *SourceFullPath, bOverwrite))
+	{
+		return FString::Printf(TEXT("Moved '%s' -> '%s'"), *SourcePath, *DestinationPath);
+	}
+
+	return FString::Printf(TEXT("Error: Failed to move '%s' -> '%s'"), *SourcePath, *DestinationPath);
+}
+
+// ============================================================================
 // Tool: get_project_structure
 // ============================================================================
 
@@ -528,6 +860,115 @@ FString FGitHubCopilotUEToolExecutor::Tool_CreateCppClass(const TSharedPtr<FJson
 }
 
 // ============================================================================
+// Tool: create_blueprint_asset
+// ============================================================================
+
+FString FGitHubCopilotUEToolExecutor::Tool_CreateBlueprintAsset(const TSharedPtr<FJsonObject>& Args)
+{
+	FString AssetName;
+	if (!Args->TryGetStringField(TEXT("asset_name"), AssetName) || AssetName.IsEmpty())
+	{
+		return TEXT("Error: 'asset_name' is required");
+	}
+
+	AssetName = SanitizeAssetName(AssetName);
+	if (AssetName.IsEmpty())
+	{
+		return TEXT("Error: asset_name must contain at least one valid character");
+	}
+
+	FString PackagePath = TEXT("/Game/Copilot");
+	Args->TryGetStringField(TEXT("package_path"), PackagePath);
+	PackagePath.ReplaceInline(TEXT("\\"), TEXT("/"));
+	PackagePath = PackagePath.TrimStartAndEnd();
+	if (PackagePath.IsEmpty())
+	{
+		PackagePath = TEXT("/Game/Copilot");
+	}
+	if (!PackagePath.StartsWith(TEXT("/")))
+	{
+		PackagePath = TEXT("/Game/") + PackagePath;
+	}
+	if (PackagePath.EndsWith(TEXT("/")))
+	{
+		PackagePath.LeftChopInline(1);
+	}
+
+	if (!PackagePath.StartsWith(TEXT("/Game")) || !FPackageName::IsValidLongPackageName(PackagePath))
+	{
+		return FString::Printf(TEXT("Error: Invalid package_path '%s'. Use /Game/..."), *PackagePath);
+	}
+
+	FString ParentClassInput = TEXT("AActor");
+	Args->TryGetStringField(TEXT("parent_class"), ParentClassInput);
+	UClass* ParentClass = ResolveParentClass(ParentClassInput);
+	if (ParentClass == nullptr)
+	{
+		return FString::Printf(TEXT("Error: Could not resolve parent_class '%s'"), *ParentClassInput);
+	}
+
+	const FString PackageName = PackagePath / AssetName;
+	const FString ObjectPath = PackageName + TEXT(".") + AssetName;
+	if (LoadObject<UObject>(nullptr, *ObjectPath) != nullptr)
+	{
+		return FString::Printf(TEXT("Error: Asset already exists at '%s'"), *ObjectPath);
+	}
+
+	UPackage* Package = CreatePackage(*PackageName);
+	if (Package == nullptr)
+	{
+		return FString::Printf(TEXT("Error: Failed to create package '%s'"), *PackageName);
+	}
+
+	const EBlueprintType BlueprintType = ParentClass->IsChildOf(UBlueprintFunctionLibrary::StaticClass())
+		? BPTYPE_FunctionLibrary
+		: BPTYPE_Normal;
+
+	UBlueprint* NewBlueprint = FKismetEditorUtilities::CreateBlueprint(
+		ParentClass,
+		Package,
+		FName(*AssetName),
+		BlueprintType,
+		UBlueprint::StaticClass(),
+		UBlueprintGeneratedClass::StaticClass(),
+		FName(TEXT("GitHubCopilotUE")));
+
+	if (NewBlueprint == nullptr)
+	{
+		return FString::Printf(TEXT("Error: Failed to create Blueprint asset '%s'"), *AssetName);
+	}
+
+	FAssetRegistryModule::AssetCreated(NewBlueprint);
+	Package->MarkPackageDirty();
+
+	const FString PackageFilename = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+	SaveArgs.SaveFlags = SAVE_None;
+	SaveArgs.bSlowTask = false;
+	if (!UPackage::SavePackage(Package, NewBlueprint, *PackageFilename, SaveArgs))
+	{
+		return FString::Printf(
+			TEXT("Error: Created Blueprint asset '%s' but failed to save package to '%s'"),
+			*AssetName, *PackageFilename);
+	}
+
+	bool bOpenEditor = true;
+	Args->TryGetBoolField(TEXT("open_editor"), bOpenEditor);
+	if (bOpenEditor && GEditor)
+	{
+		TArray<UObject*> AssetsToOpen;
+		AssetsToOpen.Add(NewBlueprint);
+		GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAssets(AssetsToOpen);
+	}
+
+	UE_LOG(LogGitHubCopilotUE, Log, TEXT("ToolExecutor: Created Blueprint asset %s (parent: %s)"), *ObjectPath, *ParentClass->GetName());
+	return FString::Printf(
+		TEXT("Created and saved Blueprint asset '%s'\nObject path: %s\nFile: %s\nParent class: %s"),
+		*AssetName, *ObjectPath, *PackageFilename, *ParentClass->GetName());
+}
+
+// ============================================================================
 // Tool: compile
 // ============================================================================
 
@@ -535,15 +976,66 @@ FString FGitHubCopilotUEToolExecutor::Tool_Compile(const TSharedPtr<FJsonObject>
 {
 	if (!CompileService.IsValid()) return TEXT("Error: Compile service not available");
 
-	// Use Live Coding by default, fallback to full compile
-	FString Mode = Args->GetStringField(TEXT("mode"));
-	if (Mode.IsEmpty()) Mode = TEXT("live_coding");
+	FString Mode;
+	Args->TryGetStringField(TEXT("mode"), Mode);
+	Mode = Mode.TrimStartAndEnd().ToLower();
 
-	UE_LOG(LogGitHubCopilotUE, Log, TEXT("ToolExecutor: Triggering compile (mode: %s)"), *Mode);
+	FCopilotResponse CompileResponse;
+	if (Mode.IsEmpty() || Mode == TEXT("full") || Mode == TEXT("compile"))
+	{
+		CompileResponse = CompileService->RequestCompile();
+	}
+	else if (Mode == TEXT("live_coding") || Mode == TEXT("live"))
+	{
+		CompileResponse = CompileService->RequestLiveCodingPatch();
+	}
+	else
+	{
+		return FString::Printf(TEXT("Error: Unsupported compile mode '%s'. Use 'full' or 'live_coding'."), *Mode);
+	}
 
-	// The compile service handles the actual invocation
-	// This is a fire-and-forget — compile results come through UE's compile notification system
-	return FString::Printf(TEXT("Compile triggered (mode: %s). Check Output Log for results."), *Mode);
+	if (CompileResponse.ResultStatus == ECopilotResultStatus::Success)
+	{
+		return CompileResponse.ResponseText;
+	}
+
+	return FString::Printf(TEXT("Error: %s"), *CompileResponse.ErrorMessage);
+}
+
+// ============================================================================
+// Tool: live_coding_patch
+// ============================================================================
+
+FString FGitHubCopilotUEToolExecutor::Tool_LiveCodingPatch(const TSharedPtr<FJsonObject>& Args)
+{
+	(void)Args;
+	if (!CompileService.IsValid()) return TEXT("Error: Compile service not available");
+
+	FCopilotResponse PatchResponse = CompileService->RequestLiveCodingPatch();
+	if (PatchResponse.ResultStatus == ECopilotResultStatus::Success)
+	{
+		return PatchResponse.ResponseText;
+	}
+	return FString::Printf(TEXT("Error: %s"), *PatchResponse.ErrorMessage);
+}
+
+// ============================================================================
+// Tool: run_automation_tests
+// ============================================================================
+
+FString FGitHubCopilotUEToolExecutor::Tool_RunAutomationTests(const TSharedPtr<FJsonObject>& Args)
+{
+	if (!CompileService.IsValid()) return TEXT("Error: Compile service not available");
+
+	FString Filter;
+	Args->TryGetStringField(TEXT("filter"), Filter);
+
+	FCopilotResponse TestResponse = CompileService->RunAutomationTests(Filter);
+	if (TestResponse.ResultStatus == ECopilotResultStatus::Success)
+	{
+		return TestResponse.ResponseText;
+	}
+	return FString::Printf(TEXT("Error: %s"), *TestResponse.ErrorMessage);
 }
 
 // ============================================================================
@@ -658,6 +1150,60 @@ TArray<TSharedPtr<FJsonValue>> FGitHubCopilotUEToolExecutor::BuildToolDefinition
 {
 	TArray<TSharedPtr<FJsonValue>> Tools;
 
+	// ── view (CLI style alias) ──
+	{
+		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
+		Params->SetStringField(TEXT("type"), TEXT("object"));
+		TSharedPtr<FJsonObject> Props = MakeShareable(new FJsonObject);
+		AddProp(Props, TEXT("path"), TEXT("string"), TEXT("Absolute or project-relative path to a file or directory"));
+		AddProp(Props, TEXT("start_line"), TEXT("integer"), TEXT("Optional start line (file only)"));
+		AddProp(Props, TEXT("end_line"), TEXT("integer"), TEXT("Optional end line (file only)"));
+		Params->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> Req;
+		Req.Add(MakeShareable(new FJsonValueString(TEXT("path"))));
+		Params->SetArrayField(TEXT("required"), Req);
+		Params->SetBoolField(TEXT("additionalProperties"), false);
+		Tools.Add(MakeToolDef(TEXT("view"),
+			TEXT("View a file or list a directory. Files return line-numbered content; directories return entries."),
+			Params));
+	}
+
+	// ── glob (CLI style alias) ──
+	{
+		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
+		Params->SetStringField(TEXT("type"), TEXT("object"));
+		TSharedPtr<FJsonObject> Props = MakeShareable(new FJsonObject);
+		AddProp(Props, TEXT("pattern"), TEXT("string"), TEXT("Wildcard pattern (for example: Source/**/*.cpp or *.uasset)"));
+		AddProp(Props, TEXT("path"), TEXT("string"), TEXT("Root directory to search from. Default: project root."));
+		AddProp(Props, TEXT("max_results"), TEXT("integer"), TEXT("Maximum number of matches to return. Default: 500."));
+		Params->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> Req;
+		Req.Add(MakeShareable(new FJsonValueString(TEXT("pattern"))));
+		Params->SetArrayField(TEXT("required"), Req);
+		Params->SetBoolField(TEXT("additionalProperties"), false);
+		Tools.Add(MakeToolDef(TEXT("glob"),
+			TEXT("Find files by wildcard pattern, similar to Copilot CLI glob."),
+			Params));
+	}
+
+	// ── rg (CLI style alias) ──
+	{
+		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
+		Params->SetStringField(TEXT("type"), TEXT("object"));
+		TSharedPtr<FJsonObject> Props = MakeShareable(new FJsonObject);
+		AddProp(Props, TEXT("pattern"), TEXT("string"), TEXT("Pattern to search for"));
+		AddProp(Props, TEXT("path"), TEXT("string"), TEXT("Directory to search in. Default: Source"));
+		AddProp(Props, TEXT("file_filter"), TEXT("string"), TEXT("Semicolon-separated wildcard filter. Default: *.h;*.cpp"));
+		Params->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> Req;
+		Req.Add(MakeShareable(new FJsonValueString(TEXT("pattern"))));
+		Params->SetArrayField(TEXT("required"), Req);
+		Params->SetBoolField(TEXT("additionalProperties"), false);
+		Tools.Add(MakeToolDef(TEXT("rg"),
+			TEXT("Search text across files (ripgrep-style alias routed to search_files)."),
+			Params));
+	}
+
 	// ── read_file ──
 	{
 		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
@@ -727,6 +1273,60 @@ TArray<TSharedPtr<FJsonValue>> FGitHubCopilotUEToolExecutor::BuildToolDefinition
 			Params));
 	}
 
+	// ── create_directory ──
+	{
+		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
+		Params->SetStringField(TEXT("type"), TEXT("object"));
+		TSharedPtr<FJsonObject> Props = MakeShareable(new FJsonObject);
+		AddProp(Props, TEXT("path"), TEXT("string"), TEXT("Directory path to create"));
+		Params->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> Req;
+		Req.Add(MakeShareable(new FJsonValueString(TEXT("path"))));
+		Params->SetArrayField(TEXT("required"), Req);
+		Params->SetBoolField(TEXT("additionalProperties"), false);
+		Tools.Add(MakeToolDef(TEXT("create_directory"),
+			TEXT("Create a directory (and parent directories) inside the project."),
+			Params));
+	}
+
+	// ── copy_file ──
+	{
+		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
+		Params->SetStringField(TEXT("type"), TEXT("object"));
+		TSharedPtr<FJsonObject> Props = MakeShareable(new FJsonObject);
+		AddProp(Props, TEXT("source_path"), TEXT("string"), TEXT("Source file path"));
+		AddProp(Props, TEXT("destination_path"), TEXT("string"), TEXT("Destination file path"));
+		AddProp(Props, TEXT("overwrite"), TEXT("boolean"), TEXT("Allow replacing destination if it already exists"));
+		Params->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> Req;
+		Req.Add(MakeShareable(new FJsonValueString(TEXT("source_path"))));
+		Req.Add(MakeShareable(new FJsonValueString(TEXT("destination_path"))));
+		Params->SetArrayField(TEXT("required"), Req);
+		Params->SetBoolField(TEXT("additionalProperties"), false);
+		Tools.Add(MakeToolDef(TEXT("copy_file"),
+			TEXT("Copy a file from one path to another within the project."),
+			Params));
+	}
+
+	// ── move_file ──
+	{
+		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
+		Params->SetStringField(TEXT("type"), TEXT("object"));
+		TSharedPtr<FJsonObject> Props = MakeShareable(new FJsonObject);
+		AddProp(Props, TEXT("source_path"), TEXT("string"), TEXT("Source file path"));
+		AddProp(Props, TEXT("destination_path"), TEXT("string"), TEXT("Destination file path"));
+		AddProp(Props, TEXT("overwrite"), TEXT("boolean"), TEXT("Allow replacing destination if it already exists"));
+		Params->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> Req;
+		Req.Add(MakeShareable(new FJsonValueString(TEXT("source_path"))));
+		Req.Add(MakeShareable(new FJsonValueString(TEXT("destination_path"))));
+		Params->SetArrayField(TEXT("required"), Req);
+		Params->SetBoolField(TEXT("additionalProperties"), false);
+		Tools.Add(MakeToolDef(TEXT("move_file"),
+			TEXT("Move/rename a file within the project."),
+			Params));
+	}
+
 	// ── search_files ──
 	{
 		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
@@ -777,6 +1377,25 @@ TArray<TSharedPtr<FJsonValue>> FGitHubCopilotUEToolExecutor::BuildToolDefinition
 			Params));
 	}
 
+	// ── create_blueprint_asset ──
+	{
+		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
+		Params->SetStringField(TEXT("type"), TEXT("object"));
+		TSharedPtr<FJsonObject> Props = MakeShareable(new FJsonObject);
+		AddProp(Props, TEXT("asset_name"), TEXT("string"), TEXT("Blueprint asset name (e.g. BP_PlayerHelper)"));
+		AddProp(Props, TEXT("package_path"), TEXT("string"), TEXT("Content path package (e.g. /Game/Blueprints). Default: /Game/Copilot"));
+		AddProp(Props, TEXT("parent_class"), TEXT("string"), TEXT("Parent class (e.g. AActor, UActorComponent, APawn, UBlueprintFunctionLibrary, or /Script/... class path)."));
+		AddProp(Props, TEXT("open_editor"), TEXT("boolean"), TEXT("Whether to open the new asset editor tab immediately. Default: true"));
+		Params->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> Req;
+		Req.Add(MakeShareable(new FJsonValueString(TEXT("asset_name"))));
+		Params->SetArrayField(TEXT("required"), Req);
+		Params->SetBoolField(TEXT("additionalProperties"), false);
+		Tools.Add(MakeToolDef(TEXT("create_blueprint_asset"),
+			TEXT("Create a Blueprint asset in the Content Browser. Supports Actor/Component/Pawn/Character and Blueprint Function Library parents."),
+			Params));
+	}
+
 	// ── compile ──
 	{
 		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
@@ -786,7 +1405,32 @@ TArray<TSharedPtr<FJsonValue>> FGitHubCopilotUEToolExecutor::BuildToolDefinition
 		Params->SetObjectField(TEXT("properties"), Props);
 		Params->SetBoolField(TEXT("additionalProperties"), false);
 		Tools.Add(MakeToolDef(TEXT("compile"),
-			TEXT("Trigger a compile of the project. Uses Live Coding by default."),
+			TEXT("Trigger compile operations. mode='full' uses editor compile, mode='live_coding' triggers Live Coding patch."),
+			Params));
+	}
+
+	// ── live_coding_patch ──
+	{
+		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
+		Params->SetStringField(TEXT("type"), TEXT("object"));
+		TSharedPtr<FJsonObject> Props = MakeShareable(new FJsonObject);
+		Params->SetObjectField(TEXT("properties"), Props);
+		Params->SetBoolField(TEXT("additionalProperties"), false);
+		Tools.Add(MakeToolDef(TEXT("live_coding_patch"),
+			TEXT("Trigger a Live Coding patch compile."),
+			Params));
+	}
+
+	// ── run_automation_tests ──
+	{
+		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
+		Params->SetStringField(TEXT("type"), TEXT("object"));
+		TSharedPtr<FJsonObject> Props = MakeShareable(new FJsonObject);
+		AddProp(Props, TEXT("filter"), TEXT("string"), TEXT("Automation filter (for example: Project., Engine., Smoke.)"));
+		Params->SetObjectField(TEXT("properties"), Props);
+		Params->SetBoolField(TEXT("additionalProperties"), false);
+		Tools.Add(MakeToolDef(TEXT("run_automation_tests"),
+			TEXT("Run Unreal automation tests with an optional filter."),
 			Params));
 	}
 

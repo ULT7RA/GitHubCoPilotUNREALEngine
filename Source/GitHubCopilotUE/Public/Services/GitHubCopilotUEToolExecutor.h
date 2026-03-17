@@ -34,14 +34,22 @@ public:
 
 private:
 	// Individual tool implementations
+	FString Tool_ViewPath(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_GlobFiles(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_ReadFile(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_WriteFile(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_EditFile(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_ListDirectory(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_SearchFiles(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_CreateDirectory(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_CopyFile(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_MoveFile(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_GetProjectStructure(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_CreateCppClass(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_CreateBlueprintAsset(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_Compile(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_LiveCodingPatch(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_RunAutomationTests(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_GetFileInfo(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_DeleteFile(const TSharedPtr<FJsonObject>& Args);
 

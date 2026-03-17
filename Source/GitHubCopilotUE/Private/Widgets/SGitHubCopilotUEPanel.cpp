@@ -15,11 +15,13 @@
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SSeparator.h"
 #include "Widgets/Layout/SExpandableArea.h"
+#include "Widgets/Images/SThrobber.h"
 #include "Widgets/Text/STextBlock.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "Widgets/Input/SComboBox.h"
 #include "Misc/DateTime.h"
 #include "Async/Async.h"
+#include "InputCoreTypes.h"
 
 #define LOCTEXT_NAMESPACE "SGitHubCopilotUEPanel"
 
@@ -41,6 +43,7 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 	{
 		ConnectionStatusDelegateHandle = BridgeService->OnConnectionStatusChanged.AddRaw(this, &SGitHubCopilotUEPanel::OnConnectionStatusChanged);
 		BridgeLogDelegateHandle = BridgeService->OnLogMessage.AddRaw(this, &SGitHubCopilotUEPanel::OnLogMessageReceived);
+		ActiveModelChangedDelegateHandle = BridgeService->OnActiveModelChanged.AddRaw(this, &SGitHubCopilotUEPanel::OnActiveModelChanged);
 	}
 
 	ChildSlot
@@ -95,24 +98,18 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 				BuildPromptInput()
 			]
 
-			// Action Buttons
-			+ SScrollBox::Slot()
-			.Padding(2)
-			[
-				BuildActionButtons()
-			]
-
-			+ SScrollBox::Slot()
-			.Padding(2)
-			[
-				SNew(SSeparator)
-			]
-
 			// Response Output
 			+ SScrollBox::Slot()
 			.Padding(2)
 			[
 				BuildResponseArea()
+			]
+
+			// Action Buttons
+			+ SScrollBox::Slot()
+			.Padding(2)
+			[
+				BuildActionButtons()
 			]
 
 			// Diff Preview
@@ -149,12 +146,33 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 
 	// Refresh context on load
 	OnRefreshContext();
+	UpdateThinkingIndicator();
 	AppendToLog(TEXT("GitHub Copilot UE panel initialized"));
 
 	// Update auth status
-	if (BridgeService.IsValid() && BridgeService->IsAuthenticated())
+	if (BridgeService.IsValid())
 	{
-		AppendToLog(FString::Printf(TEXT("Signed in as: %s"), *BridgeService->GetUsername()));
+		CurrentConnectionStatus = BridgeService->GetConnectionStatus();
+
+		if (BridgeService->IsAuthenticated())
+		{
+			if (AuthStatusText.IsValid())
+			{
+				AuthStatusText->SetText(FText::FromString(FString::Printf(TEXT("Signed in as: %s"), *BridgeService->GetUsername())));
+			}
+
+			AppendToLog(FString::Printf(TEXT("Signed in as: %s"), *BridgeService->GetUsername()));
+
+			const TArray<FCopilotModel>& CachedModels = BridgeService->GetAvailableModels();
+			if (CachedModels.Num() > 0)
+			{
+				OnModelsLoaded(CachedModels);
+			}
+			else
+			{
+				OnRefreshModels();
+			}
+		}
 	}
 }
 
@@ -174,6 +192,7 @@ SGitHubCopilotUEPanel::~SGitHubCopilotUEPanel()
 		BridgeService->OnDeviceCodeReceived.Remove(DeviceCodeDelegateHandle);
 		BridgeService->OnAuthComplete.Remove(AuthCompleteDelegateHandle);
 		BridgeService->OnModelsLoaded.Remove(ModelsLoadedDelegateHandle);
+		BridgeService->OnActiveModelChanged.Remove(ActiveModelChangedDelegateHandle);
 	}
 }
 
@@ -237,6 +256,17 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildStatusBar()
 				SNew(SButton)
 				.Text(LOCTEXT("SignOutBtn", "Sign Out"))
 				.OnClicked_Lambda([this]() -> FReply { OnSignOut(); return FReply::Handled(); })
+			]
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(4, 0)
+			[
+				SNew(SButton)
+				.Text(LOCTEXT("RefreshModelsBtn", "Refresh Models"))
+				.ToolTipText(LOCTEXT("RefreshModelsTip", "Reload model list from your Copilot subscription"))
+				.OnClicked_Lambda([this]() -> FReply { OnRefreshModels(); return FReply::Handled(); })
 			]
 
 			+ SHorizontalBox::Slot()
@@ -342,46 +372,64 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildVRContextBox()
 
 TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildPromptInput()
 {
+	const UGitHubCopilotUESettings* Settings = UGitHubCopilotUESettings::Get();
+	const FString SavedUserHandle = Settings ? Settings->UserHandle : TEXT("");
+
 	return SNew(SVerticalBox)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 2)
 		[
 			SNew(STextBlock)
-			.Text(LOCTEXT("PromptLabel", "Prompt / Command Input:"))
+			.Text(LOCTEXT("PromptLabel", "Chat Setup:"))
 			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 10))
+		]
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 2)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(0, 0, 6, 0)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("HandleLabel", "Handle:"))
+			]
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			[
+				SAssignNew(UserHandleTextBox, SEditableTextBox)
+				.Text(FText::FromString(SavedUserHandle))
+				.HintText(LOCTEXT("HandleHint", "Enter your name/handle (saved for future prompts)"))
+				.OnTextCommitted_Lambda([this](const FText& NewText, ETextCommit::Type CommitType)
+				{
+					OnUserHandleCommitted(NewText, CommitType);
+				})
+			]
 		]
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		[
 			SNew(SBox)
-			.MinDesiredHeight(80)
-			.MaxDesiredHeight(200)
+			.MinDesiredHeight(36)
 			[
-				SAssignNew(PromptTextBox, SMultiLineEditableTextBox)
-				.HintText(LOCTEXT("PromptHint", "Type a prompt or / for commands (e.g., /help, /login, /model)..."))
-				.AutoWrapText(true)
-			]
-		]
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(0, 4)
-		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("SendBtn", "Send"))
-				.OnClicked_Lambda([this]() -> FReply { OnSendPrompt(); return FReply::Handled(); })
-			]
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(4, 0)
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("ClearBtn", "Clear"))
-				.OnClicked_Lambda([this]() -> FReply { OnClearAll(); return FReply::Handled(); })
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.Padding(0, 0, 4, 0)
+				[
+					SAssignNew(TargetPathTextBox, SEditableTextBox)
+					.HintText(LOCTEXT("TargetPathHint", "Target path (file or package), e.g. Source/MyGame/MyClass.cpp or /Game/Blueprints"))
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					SAssignNew(TargetLineTextBox, SEditableTextBox)
+					.MinDesiredWidth(90.0f)
+					.HintText(LOCTEXT("TargetLineHint", "Line"))
+				]
 			]
 		];
 }
@@ -500,18 +548,85 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildActionButtons()
 TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 {
 	return SNew(SExpandableArea)
-		.AreaTitle(LOCTEXT("ResponseArea", "Response / Output"))
+		.AreaTitle(LOCTEXT("ResponseArea", "Chat"))
 		.InitiallyCollapsed(false)
 		.BodyContent()
 		[
-			SNew(SBox)
-			.MinDesiredHeight(150.0f)
-			.MaxDesiredHeight(400.0f)
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.FillHeight(1.0f)
 			[
-				SAssignNew(ResponseTextBox, SMultiLineEditableTextBox)
-				.IsReadOnly(true)
-				.AutoWrapText(true)
-				.HintText(LOCTEXT("ResponseHint", "AI responses and command output will appear here..."))
+				SNew(SBox)
+				.MinDesiredHeight(180.0f)
+				.MaxDesiredHeight(450.0f)
+				[
+					SAssignNew(ResponseTextBox, SMultiLineEditableTextBox)
+					.IsReadOnly(true)
+					.AutoWrapText(true)
+					.HintText(LOCTEXT("ResponseHint", "Running dialogue appears here (UserHandle + returned Model label)..."))
+				]
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 6.0f, 0.0f, 0.0f)
+			[
+				SAssignNew(ThinkingIndicatorRow, SHorizontalBox)
+				.Visibility(EVisibility::Collapsed)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0, 0, 6, 0)
+				[
+					SNew(SThrobber)
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT("ThinkingIndicatorText", "Copilot is thinking..."))
+					.ColorAndOpacity(FSlateColor(FLinearColor(0.8f, 0.8f, 0.8f)))
+				]
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 6.0f, 0.0f, 0.0f)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				[
+					SAssignNew(PromptTextBox, SMultiLineEditableTextBox)
+					.HintText(LOCTEXT("PromptHint", "Type a prompt or / command (Enter sends, Shift+Enter adds newline)..."))
+					.AutoWrapText(true)
+					.OnKeyDownHandler(FOnKeyDown::CreateLambda([this](const FGeometry&, const FKeyEvent& KeyEvent)
+					{
+						if (KeyEvent.GetKey() == EKeys::Enter && !KeyEvent.IsShiftDown())
+						{
+							OnSendPrompt();
+							return FReply::Handled();
+						}
+						return FReply::Unhandled();
+					}))
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(6, 0, 0, 0)
+				.VAlign(VAlign_Bottom)
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("SendBtn", "Send"))
+					.OnClicked_Lambda([this]() -> FReply { OnSendPrompt(); return FReply::Handled(); })
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(4, 0, 0, 0)
+				.VAlign(VAlign_Bottom)
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("ClearBtn", "Clear"))
+					.OnClicked_Lambda([this]() -> FReply { OnClearAll(); return FReply::Handled(); })
+				]
 			]
 		];
 }
@@ -561,7 +676,7 @@ void SGitHubCopilotUEPanel::OnSendPrompt()
 {
 	if (!PromptTextBox.IsValid() || !CommandRouter.IsValid()) return;
 
-	FString Prompt = PromptTextBox->GetText().ToString();
+	FString Prompt = PromptTextBox->GetText().ToString().TrimStartAndEnd();
 	if (Prompt.IsEmpty())
 	{
 		AppendToLog(TEXT("Cannot send empty prompt"));
@@ -571,26 +686,60 @@ void SGitHubCopilotUEPanel::OnSendPrompt()
 	// Check for slash commands first (e.g., /help, /login, /model)
 	if (Prompt.TrimStartAndEnd().StartsWith(TEXT("/")))
 	{
+		const FString SlashInput = Prompt.TrimStartAndEnd();
+		FString SlashBody = SlashInput;
+		SlashBody.RemoveFromStart(TEXT("/"));
+
+		FString SlashCommandName;
+		FString UnusedArgs;
+		if (!SlashBody.Split(TEXT(" "), &SlashCommandName, &UnusedArgs))
+		{
+			SlashCommandName = SlashBody;
+		}
+		SlashCommandName = SlashCommandName.ToLower().TrimStartAndEnd();
+
+		// /clear and /new should clear the dockable panel immediately.
+		if (SlashCommandName == TEXT("clear") || SlashCommandName == TEXT("new"))
+		{
+			OnClearAll();
+			AppendToLog(FString::Printf(TEXT("Executed: %s"), *SlashInput));
+			PromptTextBox->SetText(FText::GetEmpty());
+			return;
+		}
+
 		// Route through the module's slash command system
 		FGitHubCopilotUEModule& Module = FModuleManager::LoadModuleChecked<FGitHubCopilotUEModule>("GitHubCopilotUE");
 		TSharedPtr<FGitHubCopilotUESlashCommands> SlashCmds = Module.GetSlashCommands();
 		if (SlashCmds.IsValid())
 		{
 			FString Response;
-			if (SlashCmds->ExecuteSlashCommand(Prompt.TrimStartAndEnd(), Response))
+			if (SlashCmds->ExecuteSlashCommand(SlashInput, Response))
 			{
-				SetResponseText(Response);
-				AppendToLog(FString::Printf(TEXT("Executed: %s"), *Prompt.TrimStartAndEnd()));
+				AppendChatTurn(TEXT("System"), Response);
+				AppendToLog(FString::Printf(TEXT("Executed: %s"), *SlashInput));
 				PromptTextBox->SetText(FText::GetEmpty());
 				return;
 			}
 		}
 	}
 
+	const FString UserHandle = GetUserHandle();
+	if (UserHandle.IsEmpty())
+	{
+		AppendToLog(TEXT("Please enter your name/handle before sending prompts."));
+		AppendChatTurn(TEXT("System"), TEXT("Set your handle first, then send your prompt."));
+		return;
+	}
+	SaveUserHandle(UserHandle);
+	AppendChatTurn(UserHandle, Prompt);
+
 	// Default to AnalyzeSelection for free-form prompts sent to backend
 	FCopilotRequest Request = BuildRequest(ECopilotCommandType::AnalyzeSelection);
 	Request.UserPrompt = Prompt;
 
+	PendingCommandTypes.Add(Request.RequestId, Request.CommandType);
+	PendingPromptByRequestId.Add(Request.RequestId, Prompt);
+	MarkBackendRequestPending(Request.RequestId);
 	AppendToLog(FString::Printf(TEXT("Sending prompt (ID: %s)..."), *Request.RequestId));
 	CommandRouter->RouteCommand(Request);
 
@@ -602,14 +751,82 @@ void SGitHubCopilotUEPanel::OnActionButton(ECopilotCommandType CommandType)
 {
 	if (!CommandRouter.IsValid()) return;
 
-	FCopilotRequest Request = BuildRequest(CommandType);
-
-	// Get prompt text as additional context
-	if (PromptTextBox.IsValid())
+	auto FailAction = [this](const FString& Message)
 	{
-		Request.UserPrompt = PromptTextBox->GetText().ToString();
+		AppendToLog(Message);
+		AppendChatTurn(TEXT("System"), Message);
+	};
+
+	FCopilotRequest Request = BuildRequest(CommandType);
+	const FString PromptText = PromptTextBox.IsValid() ? PromptTextBox->GetText().ToString().TrimStartAndEnd() : TEXT("");
+	Request.UserPrompt = PromptText;
+	PopulateRequestTargetsFromUI(Request, CommandType, PromptText);
+
+	switch (CommandType)
+	{
+	case ECopilotCommandType::PatchFile:
+		if (Request.FileTargets.Num() == 0 || Request.FileTargets[0].FilePath.IsEmpty())
+		{
+			FailAction(TEXT("Patch Preview requires a target file path. Enter one in the Target path field."));
+			return;
+		}
+		if (Request.FileTargets[0].SelectedText.IsEmpty())
+		{
+			FailAction(TEXT("Patch Preview requires proposed content in the prompt box."));
+			return;
+		}
+		Request.ExecutionMode = ECopilotExecutionMode::PreviewOnly;
+		break;
+	case ECopilotCommandType::InsertIntoFile:
+		if (Request.FileTargets.Num() == 0 || Request.FileTargets[0].FilePath.IsEmpty())
+		{
+			FailAction(TEXT("Insert Into File requires a target file path."));
+			return;
+		}
+		if (Request.FileTargets[0].SelectedText.IsEmpty())
+		{
+			FailAction(TEXT("Insert Into File requires prompt text to insert."));
+			return;
+		}
+		break;
+	case ECopilotCommandType::OpenFile:
+		if (Request.FileTargets.Num() == 0 && Request.UserPrompt.IsEmpty())
+		{
+			FailAction(TEXT("Open Related File needs a file path (target path field or prompt)."));
+			return;
+		}
+		break;
+	default:
+		break;
 	}
 
+	if (CommandRouter->RequiresBackend(CommandType) && !Request.UserPrompt.IsEmpty())
+	{
+		const FString UserHandle = GetUserHandle();
+		if (UserHandle.IsEmpty())
+		{
+			AppendToLog(TEXT("Please enter your name/handle before sending prompts."));
+			AppendChatTurn(TEXT("System"), TEXT("Set your handle first, then send your prompt."));
+			return;
+		}
+
+		SaveUserHandle(UserHandle);
+		AppendChatTurn(UserHandle, Request.UserPrompt);
+		PendingPromptByRequestId.Add(Request.RequestId, Request.UserPrompt);
+	}
+
+	FString CommandName = TEXT("Action");
+	if (const UEnum* CommandEnum = StaticEnum<ECopilotCommandType>())
+	{
+		CommandName = CommandEnum->GetDisplayNameTextByValue(static_cast<int64>(CommandType)).ToString();
+	}
+	AppendChatTurn(TEXT("System"), FString::Printf(TEXT("Running action: %s"), *CommandName));
+
+	PendingCommandTypes.Add(Request.RequestId, CommandType);
+	if (CommandRouter->RequiresBackend(CommandType))
+	{
+		MarkBackendRequestPending(Request.RequestId);
+	}
 	AppendToLog(FString::Printf(TEXT("Executing command %d (ID: %s)..."), (int32)CommandType, *Request.RequestId));
 	CommandRouter->RouteCommand(Request);
 }
@@ -637,6 +854,8 @@ void SGitHubCopilotUEPanel::OnClearAll()
 		DiffPreviewTextBox->SetText(FText::GetEmpty());
 
 	CurrentDiffPreview = FCopilotDiffPreview();
+	ChatTranscriptBuffer.Empty();
+	PendingPromptByRequestId.Empty();
 	AppendToLog(TEXT("Cleared all fields"));
 }
 
@@ -664,6 +883,7 @@ void SGitHubCopilotUEPanel::OnApplyPatch()
 	}
 
 	AppendToLog(TEXT("Approving and applying pending patch..."));
+	PendingCommandTypes.Add(Request.RequestId, Request.CommandType);
 	CommandRouter->RouteCommand(Request);
 
 	// Clear local preview state (the response handler will update the UI)
@@ -695,6 +915,7 @@ void SGitHubCopilotUEPanel::OnRollbackPatch()
 	}
 
 	AppendToLog(TEXT("Requesting rollback..."));
+	PendingCommandTypes.Add(Request.RequestId, Request.CommandType);
 	CommandRouter->RouteCommand(Request);
 
 	CurrentDiffPreview = FCopilotDiffPreview();
@@ -738,7 +959,26 @@ void SGitHubCopilotUEPanel::OnSignOut()
 	{
 		DeviceCodeText->SetText(FText::GetEmpty());
 	}
+	PendingCommandTypes.Empty();
 	AppendToLog(TEXT("Signed out"));
+}
+
+void SGitHubCopilotUEPanel::OnRefreshModels()
+{
+	if (!BridgeService.IsValid())
+	{
+		AppendToLog(TEXT("ERROR: Bridge service not available"));
+		return;
+	}
+
+	if (!BridgeService->IsAuthenticated())
+	{
+		AppendToLog(TEXT("Sign in first to load models."));
+		return;
+	}
+
+	AppendToLog(TEXT("Refreshing available models..."));
+	BridgeService->FetchAvailableModels();
 }
 
 void SGitHubCopilotUEPanel::OnDeviceCodeReceived(const FString& UserCode, const FString& VerificationURI)
@@ -779,6 +1019,7 @@ void SGitHubCopilotUEPanel::OnModelsLoaded(const TArray<FCopilotModel>& Models)
 	AsyncTask(ENamedThreads::GameThread, [this, Models]()
 	{
 		ModelOptions.Empty();
+		SelectedModelOption.Reset();
 		for (const FCopilotModel& M : Models)
 		{
 			ModelOptions.Add(MakeShareable(new FString(M.Id)));
@@ -801,6 +1042,10 @@ void SGitHubCopilotUEPanel::OnModelsLoaded(const TArray<FCopilotModel>& Models)
 		if (ModelComboBox.IsValid())
 		{
 			ModelComboBox->RefreshOptions();
+			if (!SelectedModelOption.IsValid() && ModelOptions.Num() > 0)
+			{
+				SelectedModelOption = ModelOptions[0];
+			}
 			if (SelectedModelOption.IsValid())
 			{
 				ModelComboBox->SetSelectedItem(SelectedModelOption);
@@ -816,14 +1061,56 @@ void SGitHubCopilotUEPanel::OnModelSelected(TSharedPtr<FString> NewModel, ESelec
 	if (NewModel.IsValid() && BridgeService.IsValid())
 	{
 		SelectedModelOption = NewModel;
-		BridgeService->SetActiveModel(*NewModel);
-		AppendToLog(FString::Printf(TEXT("Model changed to: %s"), **NewModel));
+		const FString CurrentModel = BridgeService->GetActiveModel();
+		if (CurrentModel != *NewModel)
+		{
+			BridgeService->SetActiveModel(*NewModel);
+			BridgeService->SaveTokenCache();
+			AppendToLog(FString::Printf(TEXT("Model changed to: %s"), **NewModel));
+		}
 	}
+}
+
+void SGitHubCopilotUEPanel::OnActiveModelChanged(const FString& ModelId)
+{
+	AsyncTask(ENamedThreads::GameThread, [this, ModelId]()
+	{
+		for (const TSharedPtr<FString>& Opt : ModelOptions)
+		{
+			if (Opt.IsValid() && *Opt == ModelId)
+			{
+				SelectedModelOption = Opt;
+				if (ModelComboBox.IsValid())
+				{
+					ModelComboBox->SetSelectedItem(Opt);
+				}
+				break;
+			}
+		}
+	});
 }
 
 TSharedRef<SWidget> SGitHubCopilotUEPanel::MakeModelComboRow(TSharedPtr<FString> Item)
 {
 	return SNew(STextBlock).Text(FText::FromString(Item.IsValid() ? *Item : TEXT("(none)")));
+}
+
+void SGitHubCopilotUEPanel::OnUserHandleCommitted(const FText& NewText, ETextCommit::Type CommitType)
+{
+	SaveUserHandle(NewText.ToString());
+
+	if (CommitType != ETextCommit::Default)
+	{
+		const FString TrimmedHandle = GetUserHandle();
+		if (TrimmedHandle.IsEmpty())
+		{
+			AppendToLog(TEXT("User handle cleared. Enter a handle before sending prompts."));
+		}
+		else
+		{
+			AppendToLog(FString::Printf(TEXT("Using handle: %s"), *TrimmedHandle));
+		}
+	}
 }
 
 void SGitHubCopilotUEPanel::OnRefreshContext()
@@ -856,6 +1143,16 @@ void SGitHubCopilotUEPanel::OnResponseReceived(const FCopilotResponse& Response)
 	// Must run on game thread for UI updates
 	AsyncTask(ENamedThreads::GameThread, [this, Response]()
 	{
+		MarkBackendRequestCompleted(Response.RequestId);
+
+		ECopilotCommandType ResolvedCommandType = Response.CommandType;
+		if (const ECopilotCommandType* PendingType = PendingCommandTypes.Find(Response.RequestId))
+		{
+			ResolvedCommandType = *PendingType;
+			PendingCommandTypes.Remove(Response.RequestId);
+		}
+		PendingPromptByRequestId.Remove(Response.RequestId);
+
 		FString StatusStr;
 		switch (Response.ResultStatus)
 		{
@@ -868,14 +1165,40 @@ void SGitHubCopilotUEPanel::OnResponseReceived(const FCopilotResponse& Response)
 
 		AppendToLog(FString::Printf(TEXT("Response [%s] %s"), *Response.RequestId, *StatusStr));
 
+		FString Speaker = TEXT("System");
+		if (const FString* ReturnedModel = Response.ProviderMetadata.Find(TEXT("model")))
+		{
+			Speaker = FString::Printf(TEXT("Model (%s)"), **ReturnedModel);
+		}
+		else if (CommandRouter.IsValid() && CommandRouter->RequiresBackend(ResolvedCommandType))
+		{
+			Speaker = TEXT("Model");
+		}
+
+		FString DisplayText;
 		if (Response.ResultStatus == ECopilotResultStatus::Success)
 		{
-			SetResponseText(Response.ResponseText);
+			DisplayText = Response.ResponseText;
+
+			if ((ResolvedCommandType == ECopilotCommandType::GatherVRContext || ResolvedCommandType == ECopilotCommandType::RunQuestAudit) && VRContextText.IsValid())
+			{
+				VRContextText->SetText(FText::FromString(Response.ResponseText));
+			}
+			else if (ResolvedCommandType == ECopilotCommandType::GatherProjectContext && ProjectContextText.IsValid())
+			{
+				ProjectContextText->SetText(FText::FromString(Response.ResponseText));
+			}
 		}
 		else
 		{
-			SetResponseText(FString::Printf(TEXT("[%s] %s\n%s"), *StatusStr, *Response.ErrorMessage, *Response.ResponseText));
+			DisplayText = FString::Printf(TEXT("[%s] %s\n%s"), *StatusStr, *Response.ErrorMessage, *Response.ResponseText);
 		}
+
+		if (DisplayText.IsEmpty())
+		{
+			DisplayText = TEXT("(no response content)");
+		}
+		AppendChatTurn(Speaker, DisplayText);
 
 		// Update diff preview if present
 		if (Response.DiffPreview.bIsValid)
@@ -933,6 +1256,78 @@ FCopilotRequest SGitHubCopilotUEPanel::BuildRequest(ECopilotCommandType CommandT
 	return Request;
 }
 
+void SGitHubCopilotUEPanel::PopulateRequestTargetsFromUI(FCopilotRequest& Request, ECopilotCommandType CommandType, const FString& PromptText) const
+{
+	const FString TargetPath = TargetPathTextBox.IsValid() ? TargetPathTextBox->GetText().ToString().TrimStartAndEnd() : TEXT("");
+	const FString TargetLineText = TargetLineTextBox.IsValid() ? TargetLineTextBox->GetText().ToString().TrimStartAndEnd() : TEXT("");
+	const int32 TargetLine = TargetLineText.IsEmpty() ? 1 : FMath::Max(1, FCString::Atoi(*TargetLineText));
+
+	switch (CommandType)
+	{
+	case ECopilotCommandType::PatchFile:
+		if (!TargetPath.IsEmpty())
+		{
+			FCopilotFileTarget Target;
+			Target.FilePath = TargetPath;
+			Target.SelectedText = PromptText;
+			Request.FileTargets.Add(Target);
+		}
+		break;
+	case ECopilotCommandType::InsertIntoFile:
+		if (!TargetPath.IsEmpty())
+		{
+			FCopilotFileTarget Target;
+			Target.FilePath = TargetPath;
+			Target.LineStart = TargetLine;
+			Target.SelectedText = PromptText;
+			Request.FileTargets.Add(Target);
+		}
+		break;
+	case ECopilotCommandType::OpenFile:
+		if (!TargetPath.IsEmpty())
+		{
+			FCopilotFileTarget Target;
+			Target.FilePath = TargetPath;
+			Request.FileTargets.Add(Target);
+		}
+		break;
+	case ECopilotCommandType::OpenAsset:
+		if (!TargetPath.IsEmpty())
+		{
+			Request.CommandArguments.Add(TEXT("AssetPath"), TargetPath);
+		}
+		break;
+	case ECopilotCommandType::CreateBlueprintFunctionLibrary:
+		if (!PromptText.IsEmpty())
+		{
+			Request.CommandArguments.Add(TEXT("ClassName"), PromptText);
+		}
+		if (!TargetPath.IsEmpty())
+		{
+			Request.CommandArguments.Add(TEXT("PackagePath"), TargetPath);
+		}
+		break;
+	case ECopilotCommandType::CreateCppClass:
+	case ECopilotCommandType::CreateActorComponent:
+		if (!PromptText.IsEmpty())
+		{
+			Request.CommandArguments.Add(TEXT("ClassName"), PromptText);
+		}
+		break;
+	case ECopilotCommandType::ApproveAndApplyPatch:
+	case ECopilotCommandType::RollbackPatch:
+		if (!TargetPath.IsEmpty())
+		{
+			FCopilotFileTarget Target;
+			Target.FilePath = TargetPath;
+			Request.FileTargets.Add(Target);
+		}
+		break;
+	default:
+		break;
+	}
+}
+
 FText SGitHubCopilotUEPanel::GetConnectionStatusText() const
 {
 	switch (CurrentConnectionStatus)
@@ -970,6 +1365,98 @@ void SGitHubCopilotUEPanel::AppendToLog(const FString& Message)
 	if (LogTextBox.IsValid())
 	{
 		LogTextBox->SetText(FText::FromString(LogBuffer));
+	}
+}
+
+void SGitHubCopilotUEPanel::AppendChatTurn(const FString& Speaker, const FString& Message)
+{
+	const FString SafeSpeaker = Speaker.TrimStartAndEnd().IsEmpty() ? TEXT("System") : Speaker.TrimStartAndEnd();
+	const FString SafeMessage = Message.IsEmpty() ? TEXT("(no response content)") : Message;
+
+	if (!ChatTranscriptBuffer.IsEmpty())
+	{
+		ChatTranscriptBuffer += TEXT("\n\n");
+	}
+	ChatTranscriptBuffer += FString::Printf(TEXT("%s: %s"), *SafeSpeaker, *SafeMessage);
+
+	// Keep transcript bounded so long sessions don't explode memory usage.
+	if (ChatTranscriptBuffer.Len() > 120000)
+	{
+		ChatTranscriptBuffer = ChatTranscriptBuffer.Right(90000);
+	}
+
+	SetResponseText(ChatTranscriptBuffer);
+}
+
+void SGitHubCopilotUEPanel::MarkBackendRequestPending(const FString& RequestId)
+{
+	if (RequestId.IsEmpty())
+	{
+		return;
+	}
+
+	PendingBackendRequestIds.Add(RequestId);
+	UpdateThinkingIndicator();
+}
+
+void SGitHubCopilotUEPanel::MarkBackendRequestCompleted(const FString& RequestId)
+{
+	if (RequestId.IsEmpty())
+	{
+		return;
+	}
+
+	PendingBackendRequestIds.Remove(RequestId);
+	UpdateThinkingIndicator();
+}
+
+void SGitHubCopilotUEPanel::UpdateThinkingIndicator()
+{
+	const bool bShouldShow = PendingBackendRequestIds.Num() > 0;
+	if (bThinkingVisible == bShouldShow)
+	{
+		return;
+	}
+
+	bThinkingVisible = bShouldShow;
+	if (ThinkingIndicatorRow.IsValid())
+	{
+		ThinkingIndicatorRow->SetVisibility(bThinkingVisible ? EVisibility::Visible : EVisibility::Collapsed);
+	}
+}
+
+FString SGitHubCopilotUEPanel::GetUserHandle() const
+{
+	FString UserHandle = UserHandleTextBox.IsValid()
+		? UserHandleTextBox->GetText().ToString().TrimStartAndEnd()
+		: TEXT("");
+
+	if (UserHandle.IsEmpty())
+	{
+		const UGitHubCopilotUESettings* Settings = UGitHubCopilotUESettings::Get();
+		if (Settings)
+		{
+			UserHandle = Settings->UserHandle.TrimStartAndEnd();
+		}
+	}
+
+	return UserHandle;
+}
+
+void SGitHubCopilotUEPanel::SaveUserHandle(const FString& UserHandle)
+{
+	const FString TrimmedHandle = UserHandle.TrimStartAndEnd();
+
+	if (UserHandleTextBox.IsValid() && UserHandleTextBox->GetText().ToString() != TrimmedHandle)
+	{
+		UserHandleTextBox->SetText(FText::FromString(TrimmedHandle));
+	}
+
+	UGitHubCopilotUESettings* MutableSettings = GetMutableDefault<UGitHubCopilotUESettings>();
+	if (MutableSettings && MutableSettings->UserHandle != TrimmedHandle)
+	{
+		MutableSettings->UserHandle = TrimmedHandle;
+		MutableSettings->SaveConfig();
 	}
 }
 

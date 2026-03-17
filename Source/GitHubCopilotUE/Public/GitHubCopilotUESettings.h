@@ -35,9 +35,17 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Connection", meta = (DisplayName = "Model Name"))
 	FString ModelName;
 
+	/** Display handle used in the panel chat transcript */
+	UPROPERTY(config, EditAnywhere, Category = "Chat", meta = (DisplayName = "User Handle"))
+	FString UserHandle;
+
 	/** Request timeout in seconds */
 	UPROPERTY(config, EditAnywhere, Category = "Connection", meta = (DisplayName = "Timeout (Seconds)", ClampMin = "5", ClampMax = "300"))
 	int32 TimeoutSeconds;
+
+	/** Max tool-call loop iterations per request (0 = unlimited) */
+	UPROPERTY(config, EditAnywhere, Category = "Execution", meta = (DisplayName = "Max Tool-Call Iterations (0 = Unlimited)", ClampMin = "0", ClampMax = "5000"))
+	int32 MaxToolCallIterations;
 
 	/** Enable verbose logging for debugging */
 	UPROPERTY(config, EditAnywhere, Category = "Logging", meta = (DisplayName = "Enable Verbose Logging"))

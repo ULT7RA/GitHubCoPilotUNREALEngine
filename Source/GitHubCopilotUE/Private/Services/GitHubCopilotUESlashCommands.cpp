@@ -18,24 +18,46 @@ FGitHubCopilotUESlashCommands::FGitHubCopilotUESlashCommands()
 	RegisterCommands();
 }
 
+FGitHubCopilotUESlashCommands::~FGitHubCopilotUESlashCommands()
+{
+	if (CommandRouter.IsValid() && RouterResponseDelegateHandle.IsValid())
+	{
+		CommandRouter->OnResponseReceived.Remove(RouterResponseDelegateHandle);
+		RouterResponseDelegateHandle.Reset();
+	}
+}
+
 void FGitHubCopilotUESlashCommands::Initialize(
 	TSharedPtr<FGitHubCopilotUECommandRouter> InCommandRouter,
 	TSharedPtr<FGitHubCopilotUEBridgeService> InBridgeService,
 	TSharedPtr<FGitHubCopilotUEContextService> InContextService,
 	TSharedPtr<FGitHubCopilotUEFileService> InFileService)
 {
+	if (CommandRouter.IsValid() && RouterResponseDelegateHandle.IsValid())
+	{
+		CommandRouter->OnResponseReceived.Remove(RouterResponseDelegateHandle);
+		RouterResponseDelegateHandle.Reset();
+	}
+
 	CommandRouter = InCommandRouter;
 	BridgeService = InBridgeService;
 	ContextService = InContextService;
 	FileService = InFileService;
+
+	if (CommandRouter.IsValid())
+	{
+		RouterResponseDelegateHandle = CommandRouter->OnResponseReceived.AddRaw(
+			this, &FGitHubCopilotUESlashCommands::OnCommandResponseReceived);
+	}
+
 	Log(TEXT("SlashCommands: Initialized"));
 }
 
 void FGitHubCopilotUESlashCommands::RegisterCommands()
 {
 	// ===== Auth & Account =====
-	Commands.Add({TEXT("login"), {}, TEXT("/login"), TEXT("Log in to GitHub Copilot"), false, true});
-	Commands.Add({TEXT("logout"), {}, TEXT("/logout"), TEXT("Log out of GitHub Copilot"), false, true});
+	Commands.Add({TEXT("login"), {TEXT("signin")}, TEXT("/login"), TEXT("Log in to GitHub Copilot"), false, true});
+	Commands.Add({TEXT("logout"), {TEXT("signout")}, TEXT("/logout"), TEXT("Log out of GitHub Copilot"), false, true});
 
 	// ===== Model Selection =====
 	Commands.Add({TEXT("model"), {TEXT("models")}, TEXT("/model [model-name]"), TEXT("Select AI model to use or list available models"), false, true});
@@ -144,8 +166,8 @@ FString FGitHubCopilotUESlashCommands::GetHelpText() const
 	FString Help = TEXT("=== GitHub Copilot UE — Slash Commands ===\n\n");
 
 	Help += TEXT("--- Auth & Account ---\n");
-	Help += TEXT("  /login                               Log in to GitHub Copilot\n");
-	Help += TEXT("  /logout                              Log out of GitHub Copilot\n\n");
+	Help += TEXT("  /login, /signin                      Log in to GitHub Copilot\n");
+	Help += TEXT("  /logout, /signout                    Log out of GitHub Copilot\n\n");
 
 	Help += TEXT("--- Model ---\n");
 	Help += TEXT("  /model, /models [model-name]         Select AI model or list available\n\n");
@@ -313,6 +335,19 @@ bool FGitHubCopilotUESlashCommands::ExecuteSlashCommand(const FString& Input, FS
 		OutResponse = FString::Printf(TEXT("Command /%s recognized but not yet implemented."), *MatchedName);
 	}
 
+	// Keep a copy target for local commands that return immediate text.
+	if (!OutResponse.IsEmpty() && MatchedName != TEXT("copy") && MatchedName != TEXT("clear"))
+	{
+		for (const FCopilotSlashCommand& Cmd : Commands)
+		{
+			if (Cmd.Name == MatchedName && Cmd.bLocalOnly)
+			{
+				LastResponseText = OutResponse;
+				break;
+			}
+		}
+	}
+
 	return true;
 }
 
@@ -339,15 +374,19 @@ FString FGitHubCopilotUESlashCommands::HandleHelp(const FString& Args)
 
 FString FGitHubCopilotUESlashCommands::HandleClear(const FString& Args)
 {
-	// Signal the panel to clear via delegate
-	OnSendPrompt.ExecuteIfBound(ECopilotCommandType::Clear, TEXT(""));
+	LastResponseText.Empty();
 	return TEXT("Conversation cleared.");
 }
 
 FString FGitHubCopilotUESlashCommands::HandleCopy(const FString& Args)
 {
-	OnSendPrompt.ExecuteIfBound(ECopilotCommandType::CopyResponse, TEXT(""));
-	return TEXT("Response copied to clipboard.");
+	if (LastResponseText.IsEmpty())
+	{
+		return TEXT("No Copilot response available to copy yet.");
+	}
+
+	FPlatformApplicationMisc::ClipboardCopy(*LastResponseText);
+	return TEXT("Copied latest Copilot response to clipboard.");
 }
 
 FString FGitHubCopilotUESlashCommands::HandleContext(const FString& Args)
@@ -452,10 +491,32 @@ FString FGitHubCopilotUESlashCommands::HandleModel(const FString& Args)
 	}
 
 	// Set model
+	const FString RequestedModel = Args.TrimStartAndEnd();
+	const FString PreviousModel = BridgeService->GetActiveModel();
 	BridgeService->SetActiveModel(Args);
+	const FString CurrentModel = BridgeService->GetActiveModel();
+
+	bool bRequestedMapsToCurrent = RequestedModel.Equals(CurrentModel, ESearchCase::IgnoreCase);
+	if (!bRequestedMapsToCurrent)
+	{
+		for (const FCopilotModel& M : BridgeService->GetAvailableModels())
+		{
+			if (M.Id.Equals(RequestedModel, ESearchCase::IgnoreCase) || M.DisplayName.Equals(RequestedModel, ESearchCase::IgnoreCase))
+			{
+				bRequestedMapsToCurrent = M.Id.Equals(CurrentModel, ESearchCase::IgnoreCase);
+				break;
+			}
+		}
+	}
+
+	if (CurrentModel == PreviousModel && !bRequestedMapsToCurrent)
+	{
+		return FString::Printf(TEXT("Model '%s' is not available. Use /model to list valid model IDs."), *RequestedModel);
+	}
+
 	// Persist the choice so it survives restarts
 	BridgeService->SaveTokenCache();
-	return FString::Printf(TEXT("Model set to: %s"), *BridgeService->GetActiveModel());
+	return FString::Printf(TEXT("Model set to: %s"), *CurrentModel);
 }
 
 FString FGitHubCopilotUESlashCommands::HandleLogin(const FString& Args)
@@ -1208,4 +1269,12 @@ void FGitHubCopilotUESlashCommands::Log(const FString& Message)
 {
 	UE_LOG(LogGitHubCopilotUE, Verbose, TEXT("%s"), *Message);
 	OnLogMessage.Broadcast(Message);
+}
+
+void FGitHubCopilotUESlashCommands::OnCommandResponseReceived(const FCopilotResponse& Response)
+{
+	if (Response.ResultStatus == ECopilotResultStatus::Success && !Response.ResponseText.IsEmpty())
+	{
+		LastResponseText = Response.ResponseText;
+	}
 }

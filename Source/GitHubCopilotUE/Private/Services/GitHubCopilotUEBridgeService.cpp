@@ -773,34 +773,60 @@ void FGitHubCopilotUEBridgeService::OnModelsResponse(FHttpRequestPtr HttpReq, FH
 		}
 	}
 
-	// Set default model only if user hasn't chosen one (from cache or /model command)
-	if (ActiveModelId.IsEmpty() && AvailableModels.Num() > 0)
+	const FString PreviousActiveModel = ActiveModelId;
+	auto PickFallbackModelId = [this]() -> FString
 	{
 		// Prefer Claude over GPT if available
 		for (const FCopilotModel& M : AvailableModels)
 		{
 			if (M.Id.Contains(TEXT("claude")))
 			{
-				ActiveModelId = M.Id;
-				break;
+				return M.Id;
 			}
 		}
-		// Fallback to chat default, then first model
-		if (ActiveModelId.IsEmpty())
+
+		// Fallback to model marked as chat default
+		for (const FCopilotModel& M : AvailableModels)
+		{
+			if (M.bIsChatDefault)
+			{
+				return M.Id;
+			}
+		}
+
+		return AvailableModels.Num() > 0 ? AvailableModels[0].Id : TEXT("");
+	};
+
+	if (AvailableModels.Num() > 0)
+	{
+		bool bActiveModelFound = false;
+		if (!ActiveModelId.IsEmpty())
 		{
 			for (const FCopilotModel& M : AvailableModels)
 			{
-				if (M.bIsChatDefault)
+				if (M.Id.Equals(ActiveModelId, ESearchCase::IgnoreCase))
 				{
-					ActiveModelId = M.Id;
+					ActiveModelId = M.Id; // normalize casing from server list
+					bActiveModelFound = true;
 					break;
 				}
 			}
 		}
-		if (ActiveModelId.IsEmpty())
+
+		if (!bActiveModelFound)
 		{
-			ActiveModelId = AvailableModels[0].Id;
+			ActiveModelId = PickFallbackModelId();
+			if (!PreviousActiveModel.IsEmpty())
+			{
+				Log(FString::Printf(
+					TEXT("BridgeService: Cached active model '%s' is unavailable; falling back to '%s'"),
+					*PreviousActiveModel, *ActiveModelId));
+			}
 		}
+	}
+	else
+	{
+		ActiveModelId.Empty();
 	}
 
 	Log(FString::Printf(TEXT("BridgeService: Loaded %d models. Active: %s"), AvailableModels.Num(), *ActiveModelId));
@@ -815,6 +841,13 @@ void FGitHubCopilotUEBridgeService::OnModelsResponse(FHttpRequestPtr HttpReq, FH
 			M.bSupportsResponses && !M.bSupportsChatCompletions ? TEXT(" [/responses only]") : TEXT(""));
 		Log(Info);
 	}
+
+	if (ActiveModelId != PreviousActiveModel)
+	{
+		OnActiveModelChanged.Broadcast(ActiveModelId);
+		SaveTokenCache();
+	}
+
 	OnModelsLoaded.Broadcast(AvailableModels);
 }
 
@@ -827,8 +860,38 @@ void FGitHubCopilotUEBridgeService::SetActiveModel(const FString& ModelId)
 	{
 		CleanId = CleanId.Left(ParenIdx).TrimStartAndEnd();
 	}
-	ActiveModelId = CleanId;
-	Log(FString::Printf(TEXT("BridgeService: Active model set to: %s"), *ActiveModelId));
+	if (CleanId.IsEmpty())
+	{
+		return;
+	}
+
+	FString ResolvedId = CleanId;
+	if (AvailableModels.Num() > 0)
+	{
+		bool bFound = false;
+		for (const FCopilotModel& M : AvailableModels)
+		{
+			if (M.Id.Equals(CleanId, ESearchCase::IgnoreCase) || M.DisplayName.Equals(CleanId, ESearchCase::IgnoreCase))
+			{
+				ResolvedId = M.Id;
+				bFound = true;
+				break;
+			}
+		}
+
+		if (!bFound)
+		{
+			Log(FString::Printf(TEXT("BridgeService: Ignoring unknown model selection '%s'"), *CleanId));
+			return;
+		}
+	}
+
+	if (ActiveModelId != ResolvedId)
+	{
+		ActiveModelId = ResolvedId;
+		Log(FString::Printf(TEXT("BridgeService: Active model set to: %s"), *ActiveModelId));
+		OnActiveModelChanged.Broadcast(ActiveModelId);
+	}
 }
 
 // ============================================================================
@@ -874,10 +937,10 @@ FString FGitHubCopilotUEBridgeService::CommandTypeToString(ECopilotCommandType T
 
 FString FGitHubCopilotUEBridgeService::BuildSystemPrompt(const FCopilotRequest& Request) const
 {
-	return TEXT("You have tools: read_file, write_file, edit_file, list_directory, search_files, get_project_structure, create_cpp_class, compile, get_file_info, delete_file. Use them when needed.");
+	return TEXT("You have tools: read_file, write_file, edit_file, list_directory, search_files, get_project_structure, create_cpp_class, create_blueprint_asset, compile, get_file_info, delete_file. Use them when needed.");
 }
 
-void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Request)
+void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Request, bool bAllowToolCalls)
 {
 	// Ensure we have a valid model
 	FString ModelToUse = ActiveModelId;
@@ -936,14 +999,21 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 	JsonBody->SetStringField(TEXT("model"), ModelToUse);
 	JsonBody->SetArrayField(TEXT("messages"), ConvoMessages);
 
-	// Add tool definitions — this is what makes it agentic
-	TArray<TSharedPtr<FJsonValue>> Tools = FGitHubCopilotUEToolExecutor::BuildToolDefinitions();
-	JsonBody->SetArrayField(TEXT("tools"), Tools);
+	if (bAllowToolCalls)
+	{
+		// Add tool definitions — this is what makes it agentic
+		TArray<TSharedPtr<FJsonValue>> Tools = FGitHubCopilotUEToolExecutor::BuildToolDefinitions();
+		JsonBody->SetArrayField(TEXT("tools"), Tools);
 
-	// Explicitly tell the API to allow tool calls
-	JsonBody->SetStringField(TEXT("tool_choice"), TEXT("auto"));
-
-	Log(FString::Printf(TEXT("BridgeService: Sending %d tools, %d messages, model=%s"), Tools.Num(), ConvoMessages.Num(), *ModelToUse));
+		// Explicitly tell the API to allow tool calls
+		JsonBody->SetStringField(TEXT("tool_choice"), TEXT("auto"));
+		Log(FString::Printf(TEXT("BridgeService: Sending %d tools, %d messages, model=%s"), Tools.Num(), ConvoMessages.Num(), *ModelToUse));
+	}
+	else
+	{
+		JsonBody->SetStringField(TEXT("tool_choice"), TEXT("none"));
+		Log(FString::Printf(TEXT("BridgeService: Forcing final answer with tools disabled, messages=%d, model=%s"), ConvoMessages.Num(), *ModelToUse));
+	}
 
 	FString RequestBody;
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RequestBody);
@@ -986,6 +1056,8 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 	{
 		PendingRequestTimestamps.Remove(RequestId);
 		ActiveConversations.Remove(RequestId);
+		ToolCallIterations.Remove(RequestId);
+		ForcedFinalResponseRequestIds.Remove(RequestId);
 		Response.ResultStatus = ECopilotResultStatus::Failure;
 		Response.ErrorMessage = TEXT("Request to Copilot failed - no response");
 		Log(FString::Printf(TEXT("BridgeService: Request %s failed"), *RequestId));
@@ -1007,6 +1079,8 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 	{
 		PendingRequestTimestamps.Remove(RequestId);
 		ActiveConversations.Remove(RequestId);
+		ToolCallIterations.Remove(RequestId);
+		ForcedFinalResponseRequestIds.Remove(RequestId);
 		Response.ResultStatus = ECopilotResultStatus::Failure;
 		Response.ErrorMessage = FString::Printf(TEXT("Copilot API error (HTTP %d): %s"), StatusCode, *Body.Left(500));
 		Log(FString::Printf(TEXT("BridgeService: Request %s failed - HTTP %d"), *RequestId, StatusCode));
@@ -1042,6 +1116,8 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 	{
 		PendingRequestTimestamps.Remove(RequestId);
 		ActiveConversations.Remove(RequestId);
+		ToolCallIterations.Remove(RequestId);
+		ForcedFinalResponseRequestIds.Remove(RequestId);
 		Response.ResultStatus = ECopilotResultStatus::Failure;
 		Response.ErrorMessage = TEXT("Failed to parse Copilot response JSON");
 		OnResponseReceived.Broadcast(Response);
@@ -1058,6 +1134,8 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 	{
 		PendingRequestTimestamps.Remove(RequestId);
 		ActiveConversations.Remove(RequestId);
+		ToolCallIterations.Remove(RequestId);
+		ForcedFinalResponseRequestIds.Remove(RequestId);
 		Response.ResultStatus = ECopilotResultStatus::Failure;
 		Response.ErrorMessage = TEXT("No choices in Copilot response");
 		OnResponseReceived.Broadcast(Response);
@@ -1132,6 +1210,8 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 	{
 		PendingRequestTimestamps.Remove(RequestId);
 		ActiveConversations.Remove(RequestId);
+		ToolCallIterations.Remove(RequestId);
+		ForcedFinalResponseRequestIds.Remove(RequestId);
 		Response.ResultStatus = ECopilotResultStatus::Failure;
 		Response.ErrorMessage = TEXT("No message in response choices");
 		OnResponseReceived.Broadcast(Response);
@@ -1206,14 +1286,40 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 		// Check iteration guard
 		int32& IterCount = ToolCallIterations.FindOrAdd(RequestId);
 		IterCount++;
-		if (IterCount > 25)
+		const UGitHubCopilotUESettings* Settings = UGitHubCopilotUESettings::Get();
+		const int32 MaxToolLoopIterationsBeforeFinalization = Settings ? FMath::Max(0, Settings->MaxToolCallIterations) : 0;
+		if (MaxToolLoopIterationsBeforeFinalization > 0 && IterCount > MaxToolLoopIterationsBeforeFinalization)
 		{
+			// Never hard-fail solely on loop count. First, force a no-tool final answer.
+			if (!ForcedFinalResponseRequestIds.Contains(RequestId))
+			{
+				ForcedFinalResponseRequestIds.Add(RequestId);
+				Log(FString::Printf(TEXT("BridgeService: Tool loop exceeded %d iterations for %s — forcing final answer (no more tools)"),
+					MaxToolLoopIterationsBeforeFinalization, *RequestId));
+
+				TSharedPtr<FJsonObject> FinalizeMsg = MakeShareable(new FJsonObject);
+				FinalizeMsg->SetStringField(TEXT("role"), TEXT("system"));
+				FinalizeMsg->SetStringField(TEXT("content"),
+					TEXT("Stop calling tools now. Provide your best final answer for the user using the existing conversation and tool results."));
+				ConvoMessages.Add(MakeShareable(new FJsonValueObject(FinalizeMsg)));
+
+				FCopilotRequest ContinuationRequest;
+				ContinuationRequest.RequestId = RequestId;
+				ContinuationRequest.CommandType = ECopilotCommandType::Ask;
+				SendChatCompletion(ContinuationRequest, false);
+				return;
+			}
+
+			// If the model still keeps looping after forced-final mode, return best effort text.
 			PendingRequestTimestamps.Remove(RequestId);
 			ActiveConversations.Remove(RequestId);
 			ToolCallIterations.Remove(RequestId);
-			Response.ResultStatus = ECopilotResultStatus::Failure;
-			Response.ErrorMessage = TEXT("Tool call loop exceeded 25 iterations — stopping.");
-			Response.bSuccess = false;
+			ForcedFinalResponseRequestIds.Remove(RequestId);
+			Response.ResultStatus = ECopilotResultStatus::Success;
+			Response.ResponseText = PrefixContent.IsEmpty()
+				? TEXT("I stopped repeated tool-call looping and returned control. Please retry with a narrower prompt or explicit target path.")
+				: PrefixContent;
+			Response.bSuccess = true;
 			OnResponseReceived.Broadcast(Response);
 			return;
 		}
@@ -1225,7 +1331,7 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 		ContinuationRequest.RequestId = RequestId;
 		ContinuationRequest.CommandType = ECopilotCommandType::Ask;
 		// Don't rebuild messages — SendChatCompletion will use ActiveConversations
-		SendChatCompletion(ContinuationRequest);
+		SendChatCompletion(ContinuationRequest, true);
 		return;
 	}
 
@@ -1237,6 +1343,7 @@ HandleNormalResponse:
 	PendingRequestTimestamps.Remove(RequestId);
 	ActiveConversations.Remove(RequestId);
 	ToolCallIterations.Remove(RequestId);
+	ForcedFinalResponseRequestIds.Remove(RequestId);
 
 	FString Content = Message->HasField(TEXT("content")) ? Message->GetStringField(TEXT("content")) : TEXT("");
 

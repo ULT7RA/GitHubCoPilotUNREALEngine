@@ -29,6 +29,7 @@ class GITHUBCOPILOTUE_API FGitHubCopilotUESlashCommands
 {
 public:
 	FGitHubCopilotUESlashCommands();
+	~FGitHubCopilotUESlashCommands();
 
 	/** Initialize with service references */
 	void Initialize(
@@ -66,6 +67,7 @@ public:
 
 private:
 	void RegisterCommands();
+	void OnCommandResponseReceived(const FCopilotResponse& Response);
 
 	// Command handlers
 	FString HandleHelp(const FString& Args);
@@ -110,4 +112,6 @@ private:
 	TSharedPtr<FGitHubCopilotUEBridgeService> BridgeService;
 	TSharedPtr<FGitHubCopilotUEContextService> ContextService;
 	TSharedPtr<FGitHubCopilotUEFileService> FileService;
+	FDelegateHandle RouterResponseDelegateHandle;
+	FString LastResponseText;
 };

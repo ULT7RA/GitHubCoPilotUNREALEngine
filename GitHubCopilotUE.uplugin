@@ -17,6 +17,11 @@
 	"EnabledByDefault": true,
 	"Modules": [
 		{
+			"Name": "GitHubCopilotUERuntime",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "GitHubCopilotUE",
 			"Type": "Editor",
 			"LoadingPhase": "PostEngineInit"

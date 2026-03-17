@@ -6,6 +6,7 @@
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
+#include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Services/GitHubCopilotUETypes.h"
 
@@ -13,6 +14,7 @@ class FGitHubCopilotUECommandRouter;
 class FGitHubCopilotUEContextService;
 class FGitHubCopilotUEBridgeService;
 class FGitHubCopilotUEPatchService;
+class SHorizontalBox;
 template<typename> class SComboBox;
 struct FCopilotModel;
 
@@ -55,22 +57,32 @@ private:
 	void OnRefreshContext();
 	void OnSignIn();
 	void OnSignOut();
+	void OnRefreshModels();
 	void OnModelSelected(TSharedPtr<FString> NewModel, ESelectInfo::Type SelectInfo);
 	TSharedRef<SWidget> MakeModelComboRow(TSharedPtr<FString> Item);
+	void OnUserHandleCommitted(const FText& NewText, ETextCommit::Type CommitType);
 
 	// --- Event handlers ---
 	void OnDeviceCodeReceived(const FString& UserCode, const FString& VerificationURI);
 	void OnAuthComplete();
 	void OnModelsLoaded(const TArray<FCopilotModel>& Models);
+	void OnActiveModelChanged(const FString& ModelId);
 	void OnResponseReceived(const FCopilotResponse& Response);
 	void OnConnectionStatusChanged(ECopilotConnectionStatus NewStatus);
 	void OnLogMessageReceived(const FString& Message);
 
 	// --- Helper methods ---
 	FCopilotRequest BuildRequest(ECopilotCommandType CommandType) const;
+	void PopulateRequestTargetsFromUI(FCopilotRequest& Request, ECopilotCommandType CommandType, const FString& PromptText) const;
 	FText GetConnectionStatusText() const;
 	FSlateColor GetConnectionStatusColor() const;
 	void AppendToLog(const FString& Message);
+	void AppendChatTurn(const FString& Speaker, const FString& Message);
+	void MarkBackendRequestPending(const FString& RequestId);
+	void MarkBackendRequestCompleted(const FString& RequestId);
+	void UpdateThinkingIndicator();
+	FString GetUserHandle() const;
+	void SaveUserHandle(const FString& UserHandle);
 	void SetResponseText(const FString& Text);
 	void SetDiffText(const FString& Text);
 
@@ -82,16 +94,25 @@ private:
 
 	// --- UI State ---
 	TSharedPtr<SMultiLineEditableTextBox> PromptTextBox;
+	TSharedPtr<SEditableTextBox> UserHandleTextBox;
 	TSharedPtr<SMultiLineEditableTextBox> ResponseTextBox;
 	TSharedPtr<SMultiLineEditableTextBox> DiffPreviewTextBox;
 	TSharedPtr<SMultiLineEditableTextBox> LogTextBox;
+	TSharedPtr<SHorizontalBox> ThinkingIndicatorRow;
+	TSharedPtr<SEditableTextBox> TargetPathTextBox;
+	TSharedPtr<SEditableTextBox> TargetLineTextBox;
 	TSharedPtr<STextBlock> StatusText;
 	TSharedPtr<STextBlock> ProjectContextText;
 	TSharedPtr<STextBlock> VRContextText;
 
 	ECopilotConnectionStatus CurrentConnectionStatus = ECopilotConnectionStatus::Disconnected;
 	FCopilotDiffPreview CurrentDiffPreview;
+	FString ChatTranscriptBuffer;
 	FString LogBuffer;
+	TMap<FString, ECopilotCommandType> PendingCommandTypes;
+	TMap<FString, FString> PendingPromptByRequestId;
+	TSet<FString> PendingBackendRequestIds;
+	bool bThinkingVisible = false;
 
 	// Auth & model state
 	TSharedPtr<STextBlock> AuthStatusText;
@@ -108,4 +129,5 @@ private:
 	FDelegateHandle DeviceCodeDelegateHandle;
 	FDelegateHandle AuthCompleteDelegateHandle;
 	FDelegateHandle ModelsLoadedDelegateHandle;
+	FDelegateHandle ActiveModelChangedDelegateHandle;
 };

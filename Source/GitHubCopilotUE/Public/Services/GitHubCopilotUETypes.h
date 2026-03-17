@@ -90,17 +90,17 @@ struct FCopilotProjectContext
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString ProjectName;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString EngineVersion;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString CurrentMapName;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> SelectedAssets;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> SelectedActors;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> EnabledPlugins;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> EnabledXRPlugins;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString ActivePlatform;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> ProjectSourceDirectories;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> ModuleNames;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString QuestReadinessSummary;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString ProjectName;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString EngineVersion;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString CurrentMapName;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FString> SelectedAssets;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FString> SelectedActors;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FString> EnabledPlugins;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FString> EnabledXRPlugins;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString ActivePlatform;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FString> ProjectSourceDirectories;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FString> ModuleNames;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString QuestReadinessSummary;
 
 	TSharedPtr<FJsonObject> ToJson() const;
 	static FCopilotProjectContext FromJson(const TSharedPtr<FJsonObject>& JsonObject);
@@ -111,10 +111,10 @@ struct FCopilotFileTarget
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString FilePath;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) int32 LineStart = 0;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) int32 LineEnd = 0;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString SelectedText;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString FilePath;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") int32 LineStart = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") int32 LineEnd = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString SelectedText;
 
 	TSharedPtr<FJsonObject> ToJson() const;
 };
@@ -124,11 +124,11 @@ struct FCopilotDiffPreview
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString OriginalFilePath;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString OriginalContent;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString ProposedContent;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString UnifiedDiff;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) bool bIsValid = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString OriginalFilePath;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString OriginalContent;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString ProposedContent;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString UnifiedDiff;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") bool bIsValid = false;
 };
 
 USTRUCT(BlueprintType)
@@ -136,13 +136,13 @@ struct FCopilotRequest
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString RequestId;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) ECopilotCommandType CommandType = ECopilotCommandType::AnalyzeProject;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) ECopilotExecutionMode ExecutionMode = ECopilotExecutionMode::SuggestOnly;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString UserPrompt;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FCopilotProjectContext ProjectContext;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FCopilotFileTarget> FileTargets;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Timestamp;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString RequestId;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") ECopilotCommandType CommandType = ECopilotCommandType::AnalyzeProject;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") ECopilotExecutionMode ExecutionMode = ECopilotExecutionMode::SuggestOnly;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString UserPrompt;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FCopilotProjectContext ProjectContext;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FCopilotFileTarget> FileTargets;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString Timestamp;
 	// Non-UPROPERTY members for flexible command arguments
 	TMap<FString, FString> CommandArguments;
 
@@ -154,14 +154,14 @@ struct FCopilotResponse
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString RequestId;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) ECopilotResultStatus ResultStatus = ECopilotResultStatus::Pending;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) ECopilotCommandType CommandType = ECopilotCommandType::AnalyzeSelection;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString ResponseText;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) bool bSuccess = false;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString ErrorMessage;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FCopilotDiffPreview DiffPreview;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Timestamp;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString RequestId;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") ECopilotResultStatus ResultStatus = ECopilotResultStatus::Pending;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") ECopilotCommandType CommandType = ECopilotCommandType::AnalyzeSelection;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString ResponseText;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") bool bSuccess = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString ErrorMessage;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FCopilotDiffPreview DiffPreview;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString Timestamp;
 	// Provider metadata
 	TMap<FString, FString> ProviderMetadata;
 
@@ -173,12 +173,12 @@ struct FCopilotQuestReadiness
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) bool bOpenXRPluginEnabled = false;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) bool bMetaXRPluginEnabled = false;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) bool bAndroidPlatformConfigured = false;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> XRRelevantPlugins;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> VRRelevantActors;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Summary;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") bool bOpenXRPluginEnabled = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") bool bMetaXRPluginEnabled = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") bool bAndroidPlatformConfigured = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FString> XRRelevantPlugins;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FString> VRRelevantActors;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString Summary;
 };
 
 // ============================================================================
@@ -205,12 +205,12 @@ struct FCopilotPatchResult
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString FilePath;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString BackupPath;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) ECopilotPatchStep LastStep = ECopilotPatchStep::ValidatingPath;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) bool bSuccess = false;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) FString ErrorMessage;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> StepLog;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString FilePath;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString BackupPath;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") ECopilotPatchStep LastStep = ECopilotPatchStep::ValidatingPath;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") bool bSuccess = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString ErrorMessage;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FString> StepLog;
 
 	void LogStep(ECopilotPatchStep Step, const FString& Message)
 	{
@@ -233,3 +233,4 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FOnCopilotPatchStepProgress, const FString&
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnCopilotResponseReceived, const FCopilotResponse&);
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnCopilotConnectionStatusChanged, ECopilotConnectionStatus);
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnCopilotLogMessage, const FString&);
+

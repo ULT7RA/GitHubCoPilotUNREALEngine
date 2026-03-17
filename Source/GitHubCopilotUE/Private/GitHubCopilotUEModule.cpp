@@ -47,14 +47,15 @@ void FGitHubCopilotUEModule::StartupModule()
 		FExecuteAction::CreateRaw(this, &FGitHubCopilotUEModule::PluginButtonClicked),
 		FCanExecuteAction());
 
+	// Initialize services before tab registration.
+	// This prevents restored tabs from spawning with null service pointers.
+	InitializeServices();
+
 	// Register menus via UToolMenus (deferred to ensure ToolMenus is ready)
 	UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FGitHubCopilotUEModule::RegisterMenus));
 
 	// Register the tab spawner
 	RegisterTabSpawner();
-
-	// Initialize services
-	InitializeServices();
 
 	UE_LOG(LogGitHubCopilotUE, Verbose, TEXT("GitHubCopilotUE: Startup complete"));
 }
@@ -102,6 +103,12 @@ void FGitHubCopilotUEModule::UnregisterTabSpawner()
 TSharedRef<SDockTab> FGitHubCopilotUEModule::OnSpawnPluginTab(const FSpawnTabArgs& SpawnTabArgs)
 {
 	UE_LOG(LogGitHubCopilotUE, Verbose, TEXT("GitHubCopilotUE: Spawning tab..."));
+
+	if (!CommandRouter.IsValid() || !ContextService.IsValid() || !BridgeService.IsValid() || !PatchService.IsValid())
+	{
+		UE_LOG(LogGitHubCopilotUE, Warning, TEXT("GitHubCopilotUE: Services were not ready at tab spawn. Reinitializing now."));
+		InitializeServices();
+	}
 
 	return SNew(SDockTab)
 		.TabRole(ETabRole::NomadTab)
