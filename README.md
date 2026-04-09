@@ -27,32 +27,37 @@ A native Unreal Engine 5.x C++ editor plugin that brings GitHub Copilot directly
 
 This is **not** a mock chat panel. The plugin features a full **agentic tool-calling system** — the AI can autonomously read files, write code, search your project, create classes, and compile, just like Copilot in VS Code.
 
-### ✅ Latest Update (Mar 2026)
-- Engine-wide deployment flow validated for UE **5.6** + **5.7** (`Engine/Plugins/Marketplace/GitHubCopilotUE`)
-- Shared auth/session behavior across dockable panel + console/REPL
-- Unified chat UI with prompt + transcript in one area, plus **Enter to send** (`Shift+Enter` newline)
-- Added **Upload** support in chat (screenshots/images + text/code files) with attachment summary + clear controls
-- Visible in-chat working state via **`Copilot is thinking...`** animation
-- Expanded tool surface (`view`, `glob`, `rg`, file ops, compile/live coding/tests, Blueprint asset creation)
-- Tool-loop guard is now configurable (`Max Tool-Call Iterations`, default `0` = unlimited)
-- Blueprint creation now **auto-saves to disk** (no manual Save All required)
+### ✅ Latest Update (Apr 2026)
+- **Web search tool fixed** — was deadlocked (HTTP callbacks fire on game thread, but old code blocked game thread). Now works reliably with manual HTTP tick pumping
+- **Editor window capture** — `capture_viewport` now screenshots whatever you're looking at (Blueprint editor, Material editor, any Slate window) via `FSlateApplication::TakeScreenshot`, not just the game viewport
+- **Configurable file access** — new "Additional Allowed Paths" and "Allow All File Access" settings so the AI can read/write folders you point it to, not just the project directory
+- **Token refresh race condition fixed** — async token refresh was letting requests fire with expired tokens. Added request queuing system that holds requests until fresh token arrives. Eliminated most "request_status=2" failures
+- **Live tool activity in chat** — see what the AI is doing in real time (web searches, file reads, tool calls) just like Copilot CLI shows thinking/reasoning
+- **Thinking/reasoning extraction** — supports reasoning_content (DeepSeek/OpenAI), thinking array parts (Claude), and PrefixContent formats
+- **Handle input removed** — uses your GitHub username automatically, no more manual handle entry
+- **Chat font** — Consolas Bold 12 for clean monospace readability
+- **API headers updated** — models endpoint uses `X-GitHub-Api-Version: 2025-05-01`, chat completions endpoint no longer sends the header (matches official VS Code extension behavior)
+- **WebSearch crash fix** — fixed use-after-free in HTTP callback (lambda was capturing stack locals by reference)
 
 ## Features
 
 ### 🤖 Agentic AI Assistant
 - **Tool-calling loop** — the AI can chain multiple tool calls (read → analyze → edit → compile) in a single conversation turn
-- **19 built-in tools**: `view`, `glob`, `rg`, `read_file`, `write_file`, `edit_file`, `list_directory`, `create_directory`, `copy_file`, `move_file`, `search_files`, `get_project_structure`, `create_cpp_class`, `create_blueprint_asset`, `compile`, `live_coding_patch`, `run_automation_tests`, `get_file_info`, `delete_file`
+- **22 built-in tools**: `view`, `glob`, `rg`, `read_file`, `write_file`, `edit_file`, `list_directory`, `create_directory`, `copy_file`, `move_file`, `search_files`, `get_project_structure`, `create_cpp_class`, `create_blueprint_asset`, `compile`, `live_coding_patch`, `run_automation_tests`, `get_file_info`, `delete_file`, `web_search`, `capture_viewport`, `spawn_actor`, `create_material_asset`, `create_data_table`, `create_niagara_system`
+- **Web search** — DuckDuckGo-powered web search so the AI can look things up
+- **Vision/Screenshot** — captures the active editor window (Blueprints, Materials, anything) and sends to vision-capable models
 - Automatic file backups before any write operation
-- Safety-enforced write roots — the AI can only modify files within approved directories
+- Safety-enforced write roots — configurable allowed directories + optional unrestricted mode
 
 ### 💬 Native Editor Panel
 - Dockable Slate tab: **Window → GitHub Copilot**
 - Real-time project context (project name, engine version, current map, selected assets/actors)
 - VR/Quest/OpenXR readiness summary
 - Unified chat window (transcript + prompt composer), with **Enter** to send and **Shift+Enter** for newline
+- **Live tool activity feed** — see what the AI is doing in real-time (searching, reading files, running tools, thinking/reasoning)
 - **Upload button** in chat composer to attach files/screenshots to the next request
-- Built-in thinking indicator (`Copilot is thinking...`) while backend/model work is in flight
-- Persistent user handle + running chat transcript (`Handle: prompt` and `Model (returned-id): response`)
+- Uses your **GitHub username** as chat handle automatically (no manual setup)
+- **Consolas Bold** monospace chat font for readability
 - 20+ action buttons (Analyze Selection, Generate C++ Class, Preview Patch, Trigger Compile, etc.)
 - Diff preview area for code changes
 - Execution log
@@ -109,7 +114,7 @@ Copilot /help              Show all commands
 
 ```bash
 cd "YourProject/Plugins"
-git clone https://github.com/YOUR_USERNAME/GitHubCopilotUE.git
+git clone https://github.com/ULT7RA/GitHubCoPilotUNREALEngine.git GitHubCopilotUE
 ```
 
 ### Option B: Download and copy
@@ -371,7 +376,7 @@ Go to **Edit → Project Settings → Plugins → GitHub Copilot UE**
 ### Chat
 | Setting | Default | Description |
 |---------|---------|-------------|
-| User Handle | (empty) | Prefix used for user chat turns in the transcript (required before sending prompts) |
+| Max Output Tokens | `16384` | Maximum tokens per API response |
 
 ### Logging
 | Setting | Default | Description |
@@ -394,6 +399,8 @@ Go to **Edit → Project Settings → Plugins → GitHub Copilot UE**
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Allowed Write Roots | `["Source", "Config", "Plugins"]` | Directories the AI is allowed to write to (relative to project root) |
+| Additional Allowed Paths | (empty) | Absolute paths to external folders the AI can access (e.g., `C:/MyCode/SharedLib`) |
+| Allow All File Access | `false` | When enabled, the AI can access any path on the system without restriction |
 
 ### Compile
 | Setting | Default | Description |
