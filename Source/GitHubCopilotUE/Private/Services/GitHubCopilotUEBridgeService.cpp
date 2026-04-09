@@ -1284,13 +1284,44 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 	// else: tool call continuation — messages already have assistant + tool results
 
 	// ── Conversation trimming ──
-	// If the serialized conversation exceeds a safe payload threshold, trim older
-	// messages (preserving system prompt at index 0 and the most recent turns).
-	// This prevents 400 errors from exceeding the model's context window.
+	// Aggressively truncate old tool results and drop stale messages to prevent 408 timeouts.
+	// The Copilot API times out around ~200KB request bodies.
 	{
-		constexpr int32 MaxPayloadChars = 800000; // ~800KB safe limit for serialized JSON
-		constexpr int32 MinMessagesToKeep = 6;     // system + at least 2 recent user/assistant pairs + current
+		constexpr int32 MaxToolResultChars = 2000;   // Old tool results truncated to this
+		constexpr int32 MaxOldAssistantChars = 4000;  // Old assistant messages truncated to this
+		constexpr int32 MaxPayloadChars = 120000;     // ~120KB target (well under API timeout)
+		constexpr int32 KeepRecentMessages = 16;      // Keep the last N messages fully intact
+		constexpr int32 MinMessagesToKeep = 4;         // Absolute minimum: system + last few turns
 
+		// Pass 1: Truncate old tool/assistant content (keep recent messages intact)
+		int32 RecentStart = FMath::Max(1, ConvoMessages.Num() - KeepRecentMessages);
+		for (int32 i = 1; i < RecentStart; ++i)
+		{
+			TSharedPtr<FJsonObject> Msg = ConvoMessages[i]->AsObject();
+			if (!Msg.IsValid()) continue;
+
+			FString Role = Msg->GetStringField(TEXT("role"));
+			if (Role == TEXT("tool"))
+			{
+				FString Content = Msg->GetStringField(TEXT("content"));
+				if (Content.Len() > MaxToolResultChars)
+				{
+					Content = Content.Left(MaxToolResultChars) + TEXT("\n...[truncated]");
+					Msg->SetStringField(TEXT("content"), Content);
+				}
+			}
+			else if (Role == TEXT("assistant"))
+			{
+				FString Content = Msg->GetStringField(TEXT("content"));
+				if (Content.Len() > MaxOldAssistantChars)
+				{
+					Content = Content.Left(MaxOldAssistantChars) + TEXT("\n...[truncated]");
+					Msg->SetStringField(TEXT("content"), Content);
+				}
+			}
+		}
+
+		// Pass 2: Estimate total size and drop old messages if still too large
 		auto EstimatePayloadSize = [](const TArray<TSharedPtr<FJsonValue>>& Msgs) -> int32
 		{
 			int32 Total = 0;
@@ -1326,18 +1357,16 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 		int32 PayloadEstimate = EstimatePayloadSize(ConvoMessages);
 		if (PayloadEstimate > MaxPayloadChars && ConvoMessages.Num() > MinMessagesToKeep)
 		{
-			Log(FString::Printf(TEXT("BridgeService: [CONVO] Payload too large (%d chars, %d msgs) — trimming older messages"),
+			Log(FString::Printf(TEXT("BridgeService: [PRUNE] Payload %d chars (%d msgs) — dropping old messages"),
 				PayloadEstimate, ConvoMessages.Num()));
 
-			// Keep system prompt (index 0) and the most recent messages
 			while (PayloadEstimate > MaxPayloadChars && ConvoMessages.Num() > MinMessagesToKeep)
 			{
-				// Remove the oldest non-system message (index 1)
 				ConvoMessages.RemoveAt(1);
 				PayloadEstimate = EstimatePayloadSize(ConvoMessages);
 			}
 
-			Log(FString::Printf(TEXT("BridgeService: [CONVO] Trimmed to %d messages (%d chars)"),
+			Log(FString::Printf(TEXT("BridgeService: [PRUNE] Trimmed to %d messages (%d chars)"),
 				ConvoMessages.Num(), PayloadEstimate));
 		}
 	}
@@ -1873,6 +1902,13 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 			OnToolActivity.Broadcast(FString::Printf(TEXT("  Done: %s"), *ResultPreview));
 
 			Log(FString::Printf(TEXT("BridgeService: Tool %s returned %d chars"), *ToolName, ToolResult.Len()));
+
+			// Cap individual tool results to prevent single massive entries
+			constexpr int32 MaxSingleToolResultChars = 15000;
+			if (ToolResult.Len() > MaxSingleToolResultChars && !ToolResult.StartsWith(TEXT("__RENDER_IMAGE__")))
+			{
+				ToolResult = ToolResult.Left(MaxSingleToolResultChars) + FString::Printf(TEXT("\n\n... [output truncated at %d chars, original was %d chars]"), MaxSingleToolResultChars, ToolResult.Len());
+			}
 
 			// Append tool result to conversation
 			TSharedPtr<FJsonObject> ToolResultMsg = MakeShareable(new FJsonObject);
