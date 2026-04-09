@@ -1889,23 +1889,93 @@ FString FGitHubCopilotUEToolExecutor::Tool_CaptureViewport(const TSharedPtr<FJso
 		IFileManager::Get().Delete(*OutputPath);
 	}
 
-	// Get the active top-level Slate window
-	TSharedPtr<SWindow> ActiveWindow = FSlateApplication::Get().GetActiveTopLevelWindow();
-	if (!ActiveWindow.IsValid())
+	// Optional target: "main" (largest window, default), "active" (focused),
+	// or a substring to match against window titles (e.g. "Blueprint", "Material")
+	FString Target = TEXT("main");
+	if (Args.IsValid() && Args->HasField(TEXT("target")))
 	{
-		const TArray<TSharedRef<SWindow>>& AllWindows = FSlateApplication::Get().GetInteractiveTopLevelWindows();
-		if (AllWindows.Num() > 0)
+		Target = Args->GetStringField(TEXT("target"));
+	}
+
+	const TArray<TSharedRef<SWindow>>& AllWindows = FSlateApplication::Get().GetInteractiveTopLevelWindows();
+
+	TSharedPtr<SWindow> ChosenWindow;
+	FString ChosenTitle;
+
+	if (Target == TEXT("active"))
+	{
+		ChosenWindow = FSlateApplication::Get().GetActiveTopLevelWindow();
+		if (ChosenWindow.IsValid())
 		{
-			ActiveWindow = AllWindows[0];
+			ChosenTitle = ChosenWindow->GetTitle().ToString();
+		}
+	}
+	else if (Target == TEXT("main"))
+	{
+		// Pick the largest window by pixel area — this is the main editor
+		int64 LargestArea = 0;
+		for (const TSharedRef<SWindow>& Win : AllWindows)
+		{
+			FVector2D WinSize = Win->GetSizeInScreen();
+			int64 Area = (int64)WinSize.X * (int64)WinSize.Y;
+			if (Area > LargestArea)
+			{
+				LargestArea = Area;
+				ChosenWindow = Win;
+				ChosenTitle = Win->GetTitle().ToString();
+			}
+		}
+	}
+	else
+	{
+		// Match by title substring (case-insensitive)
+		for (const TSharedRef<SWindow>& Win : AllWindows)
+		{
+			FString Title = Win->GetTitle().ToString();
+			if (Title.Contains(Target, ESearchCase::IgnoreCase))
+			{
+				ChosenWindow = Win;
+				ChosenTitle = Title;
+				break;
+			}
+		}
+		// If no title match, list available windows for the model
+		if (!ChosenWindow.IsValid())
+		{
+			FString WindowList;
+			for (const TSharedRef<SWindow>& Win : AllWindows)
+			{
+				FVector2D WinSize = Win->GetSizeInScreen();
+				WindowList += FString::Printf(TEXT("  - \"%s\" (%dx%d)\n"),
+					*Win->GetTitle().ToString(), (int32)WinSize.X, (int32)WinSize.Y);
+			}
+			return FString::Printf(TEXT("Error: No window matching \"%s\". Available windows:\n%s"), *Target, *WindowList);
 		}
 	}
 
-	if (ActiveWindow.IsValid())
+	if (!ChosenWindow.IsValid() && AllWindows.Num() > 0)
+	{
+		// Ultimate fallback: largest window
+		int64 LargestArea = 0;
+		for (const TSharedRef<SWindow>& Win : AllWindows)
+		{
+			FVector2D WinSize = Win->GetSizeInScreen();
+			int64 Area = (int64)WinSize.X * (int64)WinSize.Y;
+			if (Area > LargestArea)
+			{
+				LargestArea = Area;
+				ChosenWindow = Win;
+				ChosenTitle = Win->GetTitle().ToString();
+			}
+		}
+	}
+
+	if (ChosenWindow.IsValid())
 	{
 		// Use Slate's TakeScreenshot to capture the window content widget
 		TArray<FColor> PixelData;
 		FIntVector OutSize;
-		TSharedRef<SWidget> WindowContent = ActiveWindow->GetContent();
+		TSharedRef<SWidget> WindowContent = ChosenWindow->GetContent();
 		bool bCaptured = FSlateApplication::Get().TakeScreenshot(WindowContent, PixelData, OutSize);
 		if (bCaptured && PixelData.Num() > 0 && OutSize.X > 0 && OutSize.Y > 0)
 		{
@@ -1917,7 +1987,7 @@ FString FGitHubCopilotUEToolExecutor::Tool_CaptureViewport(const TSharedPtr<FJso
 				const TArray64<uint8>& PngData = PngWrapper->GetCompressed();
 				if (FFileHelper::SaveArrayToFile(PngData, *OutputPath))
 				{
-					return FString::Printf(TEXT("__RENDER_IMAGE__:%s\nEditor window captured: %s (%dx%d)"), *OutputPath, *OutputPath, OutSize.X, OutSize.Y);
+					return FString::Printf(TEXT("__RENDER_IMAGE__:%s\nCaptured window \"%s\" (%dx%d)"), *OutputPath, *ChosenTitle, OutSize.X, OutSize.Y);
 				}
 			}
 		}
@@ -2391,13 +2461,13 @@ TArray<TSharedPtr<FJsonValue>> FGitHubCopilotUEToolExecutor::BuildToolDefinition
 		TSharedPtr<FJsonObject> Params = MakeShareable(new FJsonObject);
 		Params->SetStringField(TEXT("type"), TEXT("object"));
 		TSharedPtr<FJsonObject> Props = MakeShareable(new FJsonObject);
-		AddProp(Props, TEXT("resolution_x"), TEXT("integer"), TEXT("Screenshot width in pixels (default: 1280)"));
-		AddProp(Props, TEXT("resolution_y"), TEXT("integer"), TEXT("Screenshot height in pixels (default: 720)"));
+		AddProp(Props, TEXT("target"), TEXT("string"),
+			TEXT("Which window to capture. \"main\" (default) = largest editor window, \"active\" = currently focused window, or a substring to match a window title (e.g. \"Blueprint\", \"Material\", \"Level\"). If no match, returns a list of available windows."));
 		Params->SetObjectField(TEXT("properties"), Props);
 		Params->SetArrayField(TEXT("required"), TArray<TSharedPtr<FJsonValue>>());
 		Params->SetBoolField(TEXT("additionalProperties"), false);
 		Tools.Add(MakeToolDef(TEXT("capture_viewport"),
-			TEXT("Capture a screenshot of the current editor viewport. The image will be sent back to you for visual analysis so you can see what the scene looks like and make informed decisions about design, layout, materials, and lighting."),
+			TEXT("Capture a screenshot of an Unreal Engine editor window. By default captures the main (largest) editor window, which shows the viewport, Blueprint editor, or whatever is open. Use the target parameter to capture a specific window by title. The image is sent back to you for visual analysis."),
 			Params));
 	}
 
