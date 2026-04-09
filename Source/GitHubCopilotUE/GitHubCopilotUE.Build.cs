@@ -44,5 +44,6 @@ PrivateDependencyModuleNames.AddRange(new string[]
 PrivateDependencyModuleNames.Add("EditorFramework");
 PrivateDependencyModuleNames.Add("ApplicationCore");
 PrivateDependencyModuleNames.Add("OutputLog");
+PrivateDependencyModuleNames.Add("ImageWrapper");
 }
 }

@@ -149,25 +149,38 @@ void FGitHubCopilotUEModule::RegisterMenus()
 
 void FGitHubCopilotUEModule::InitializeServices()
 {
-	// Create services
-	ContextService = MakeShareable(new FGitHubCopilotUEContextService());
-	FileService = MakeShareable(new FGitHubCopilotUEFileService());
-	PatchService = MakeShareable(new FGitHubCopilotUEPatchService());
-	BridgeService = MakeShareable(new FGitHubCopilotUEBridgeService());
-	CompileService = MakeShareable(new FGitHubCopilotUECompileService());
-	QuestService = MakeShareable(new FGitHubCopilotUEQuestService());
-	CommandRouter = MakeShareable(new FGitHubCopilotUECommandRouter());
+	// Guard: don't recreate BridgeService if it already exists and has active conversations.
+	// This prevents losing conversation history on tab respawn or Live Coding reload.
+	const bool bBridgeAlreadyValid = BridgeService.IsValid();
+
+	if (!ContextService.IsValid())
+		ContextService = MakeShareable(new FGitHubCopilotUEContextService());
+	if (!FileService.IsValid())
+		FileService = MakeShareable(new FGitHubCopilotUEFileService());
+	if (!PatchService.IsValid())
+		PatchService = MakeShareable(new FGitHubCopilotUEPatchService());
+	if (!BridgeService.IsValid())
+		BridgeService = MakeShareable(new FGitHubCopilotUEBridgeService());
+	if (!CompileService.IsValid())
+		CompileService = MakeShareable(new FGitHubCopilotUECompileService());
+	if (!QuestService.IsValid())
+		QuestService = MakeShareable(new FGitHubCopilotUEQuestService());
+	if (!CommandRouter.IsValid())
+		CommandRouter = MakeShareable(new FGitHubCopilotUECommandRouter());
 
 	// Wire PatchService to use the shared FileService
 	PatchService->SetFileService(FileService);
 
-	// Initialize bridge
-	BridgeService->Initialize();
+	// Only initialize bridge if it was just created (preserve conversation state on reinit)
+	if (!bBridgeAlreadyValid)
+	{
+		BridgeService->Initialize();
 
-	// Create tool executor and give it to the bridge (makes AI agentic)
-	TSharedPtr<FGitHubCopilotUEToolExecutor> ToolExecutor = MakeShareable(new FGitHubCopilotUEToolExecutor());
-	ToolExecutor->Initialize(FileService, ContextService, CompileService);
-	BridgeService->SetToolExecutor(ToolExecutor);
+		// Create tool executor and give it to the bridge (makes AI agentic)
+		TSharedPtr<FGitHubCopilotUEToolExecutor> ToolExecutor = MakeShareable(new FGitHubCopilotUEToolExecutor());
+		ToolExecutor->Initialize(FileService, ContextService, CompileService);
+		BridgeService->SetToolExecutor(ToolExecutor);
+	}
 
 	// Initialize command router with all services
 	CommandRouter->Initialize(

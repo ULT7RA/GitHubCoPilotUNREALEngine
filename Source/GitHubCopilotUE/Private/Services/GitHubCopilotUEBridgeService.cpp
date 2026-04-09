@@ -8,10 +8,63 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "Misc/DateTime.h"
+#include "Misc/Base64.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "HAL/PlatformProcess.h"
 #include "GenericPlatform/GenericPlatformHttp.h"
+
+namespace
+{
+constexpr int32 MaxNoResponseRetries = 2;
+
+FString ResolveAttachmentMimeType(const FCopilotAttachment& Attachment)
+{
+	if (!Attachment.MimeType.IsEmpty())
+	{
+		return Attachment.MimeType;
+	}
+
+	const FString Extension = FPaths::GetExtension(Attachment.FilePath, false).ToLower();
+	if (Extension == TEXT("png")) return TEXT("image/png");
+	if (Extension == TEXT("jpg") || Extension == TEXT("jpeg")) return TEXT("image/jpeg");
+	if (Extension == TEXT("webp")) return TEXT("image/webp");
+	if (Extension == TEXT("gif")) return TEXT("image/gif");
+	if (Extension == TEXT("bmp")) return TEXT("image/bmp");
+	if (Extension == TEXT("txt")) return TEXT("text/plain");
+	if (Extension == TEXT("md")) return TEXT("text/markdown");
+	if (Extension == TEXT("json")) return TEXT("application/json");
+	if (Extension == TEXT("ini")) return TEXT("text/plain");
+	if (Extension == TEXT("cpp") || Extension == TEXT("h") || Extension == TEXT("hpp") || Extension == TEXT("cs"))
+	{
+		return TEXT("text/plain");
+	}
+
+	return TEXT("application/octet-stream");
+}
+
+bool IsLikelyTextAttachment(const FString& FilePath)
+{
+	const FString Extension = FPaths::GetExtension(FilePath, false).ToLower();
+	return Extension == TEXT("txt")
+		|| Extension == TEXT("md")
+		|| Extension == TEXT("json")
+		|| Extension == TEXT("ini")
+		|| Extension == TEXT("log")
+		|| Extension == TEXT("cpp")
+		|| Extension == TEXT("h")
+		|| Extension == TEXT("hpp")
+		|| Extension == TEXT("cs")
+		|| Extension == TEXT("py")
+		|| Extension == TEXT("js")
+		|| Extension == TEXT("ts");
+}
+
+bool IsImageMimeType(const FString& MimeType)
+{
+	return MimeType.StartsWith(TEXT("image/"));
+}
+} // namespace
 
 FGitHubCopilotUEBridgeService::FGitHubCopilotUEBridgeService()
 {
@@ -26,6 +79,7 @@ void FGitHubCopilotUEBridgeService::Initialize()
 {
 	Log(TEXT("BridgeService: Initializing GitHub Copilot integration..."));
 	LoadTokenCache();
+	LoadConversationCache();
 
 	if (!GitHubAccessToken.IsEmpty())
 	{
@@ -43,7 +97,9 @@ void FGitHubCopilotUEBridgeService::Initialize()
 void FGitHubCopilotUEBridgeService::Shutdown()
 {
 	Log(TEXT("BridgeService: Shutting down..."));
+	SaveConversationCache();
 	PendingRequestTimestamps.Empty();
+	NoResponseRetryCounts.Empty();
 }
 
 // ============================================================================
@@ -302,11 +358,14 @@ void FGitHubCopilotUEBridgeService::ExchangeForCopilotToken()
 
 void FGitHubCopilotUEBridgeService::OnCopilotTokenResponse(FHttpRequestPtr HttpReq, FHttpResponsePtr HttpResp, bool bSuccess)
 {
+	bIsRefreshingToken = false;
+
 	if (!bSuccess || !HttpResp.IsValid())
 	{
 		Log(TEXT("BridgeService: Failed to reach Copilot token endpoint"));
 		SetConnectionStatus(ECopilotConnectionStatus::Error);
 		SetAuthState(ECopilotAuthState::Error);
+		FlushQueuedRequestsAsFailure(TEXT("Token refresh failed — could not reach Copilot token endpoint."));
 		return;
 	}
 
@@ -316,6 +375,7 @@ void FGitHubCopilotUEBridgeService::OnCopilotTokenResponse(FHttpRequestPtr HttpR
 			HttpResp->GetResponseCode()));
 		SetConnectionStatus(ECopilotConnectionStatus::Error);
 		SetAuthState(ECopilotAuthState::Error);
+		FlushQueuedRequestsAsFailure(FString::Printf(TEXT("Token refresh failed (HTTP %d)."), HttpResp->GetResponseCode()));
 		return;
 	}
 
@@ -325,6 +385,7 @@ void FGitHubCopilotUEBridgeService::OnCopilotTokenResponse(FHttpRequestPtr HttpR
 	{
 		Log(TEXT("BridgeService: Failed to parse Copilot token response"));
 		SetConnectionStatus(ECopilotConnectionStatus::Error);
+		FlushQueuedRequestsAsFailure(TEXT("Token refresh failed — bad response from token endpoint."));
 		return;
 	}
 
@@ -378,6 +439,9 @@ void FGitHubCopilotUEBridgeService::OnCopilotTokenResponse(FHttpRequestPtr HttpR
 
 	OnAuthComplete.Broadcast();
 
+	// Flush any requests that were waiting for the token refresh
+	FlushQueuedRequests();
+
 	// If we already got the endpoint from token exchange, skip GraphQL and go straight to models
 	if (!CopilotAPIBase.IsEmpty())
 	{
@@ -412,10 +476,45 @@ bool FGitHubCopilotUEBridgeService::IsCopilotTokenExpired() const
 
 void FGitHubCopilotUEBridgeService::RefreshCopilotTokenIfNeeded()
 {
-	if (IsCopilotTokenExpired() && !GitHubAccessToken.IsEmpty())
+	if (IsCopilotTokenExpired() && !GitHubAccessToken.IsEmpty() && !bIsRefreshingToken)
 	{
 		Log(TEXT("BridgeService: Copilot token expired, refreshing..."));
+		bIsRefreshingToken = true;
 		ExchangeForCopilotToken();
+	}
+}
+
+void FGitHubCopilotUEBridgeService::FlushQueuedRequests()
+{
+	if (QueuedRequestsAwaitingToken.Num() == 0) return;
+
+	Log(FString::Printf(TEXT("BridgeService: Flushing %d queued requests after token refresh"), QueuedRequestsAwaitingToken.Num()));
+	TArray<TPair<FCopilotRequest, bool>> Queued = MoveTemp(QueuedRequestsAwaitingToken);
+	QueuedRequestsAwaitingToken.Empty();
+
+	for (const auto& Pair : Queued)
+	{
+		PendingRequestTimestamps.Add(Pair.Key.RequestId, FPlatformTime::Seconds());
+		NoResponseRetryCounts.Remove(Pair.Key.RequestId);
+		SendChatCompletion(Pair.Key, Pair.Value);
+	}
+}
+
+void FGitHubCopilotUEBridgeService::FlushQueuedRequestsAsFailure(const FString& ErrorMessage)
+{
+	if (QueuedRequestsAwaitingToken.Num() == 0) return;
+
+	Log(FString::Printf(TEXT("BridgeService: Failing %d queued requests: %s"), QueuedRequestsAwaitingToken.Num(), *ErrorMessage));
+	TArray<TPair<FCopilotRequest, bool>> Queued = MoveTemp(QueuedRequestsAwaitingToken);
+	QueuedRequestsAwaitingToken.Empty();
+
+	for (const auto& Pair : Queued)
+	{
+		FCopilotResponse Resp;
+		Resp.RequestId = Pair.Key.RequestId;
+		Resp.ResultStatus = ECopilotResultStatus::Failure;
+		Resp.ErrorMessage = ErrorMessage;
+		OnResponseReceived.Broadcast(Resp);
 	}
 }
 
@@ -574,10 +673,10 @@ void FGitHubCopilotUEBridgeService::FetchAvailableModels()
 	HttpReq->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
 	HttpReq->SetHeader(TEXT("Accept"), TEXT("application/json"));
 	HttpReq->SetHeader(TEXT("Copilot-Integration-Id"), TEXT("vscode-chat"));
-	HttpReq->SetHeader(TEXT("Editor-Version"), TEXT("vscode/1.104.3"));
-	HttpReq->SetHeader(TEXT("Editor-Plugin-Version"), TEXT("copilot-chat/0.26.7"));
-	HttpReq->SetHeader(TEXT("User-Agent"), TEXT("GitHubCopilotChat/0.26.7"));
-	HttpReq->SetHeader(TEXT("X-GitHub-Api-Version"), TEXT("2025-04-01"));
+	HttpReq->SetHeader(TEXT("Editor-Version"), TEXT("vscode/1.103.2"));
+	HttpReq->SetHeader(TEXT("Editor-Plugin-Version"), TEXT("copilot-chat/0.27.1"));
+	HttpReq->SetHeader(TEXT("User-Agent"), TEXT("GitHubCopilotChat/0.27.1"));
+	HttpReq->SetHeader(TEXT("X-GitHub-Api-Version"), TEXT("2025-05-01"));
 	HttpReq->OnProcessRequestComplete().BindRaw(this, &FGitHubCopilotUEBridgeService::OnModelsResponse);
 	HttpReq->ProcessRequest();
 }
@@ -910,10 +1009,18 @@ void FGitHubCopilotUEBridgeService::SendRequest(const FCopilotRequest& Request)
 		return;
 	}
 
-	RefreshCopilotTokenIfNeeded();
+	// If token is expired, refresh it and queue this request to send when the token arrives
+	if (IsCopilotTokenExpired())
+	{
+		Log(FString::Printf(TEXT("BridgeService: Token expired — queuing request %s while refreshing"), *Request.RequestId));
+		QueuedRequestsAwaitingToken.Add(TPair<FCopilotRequest, bool>(Request, true));
+		RefreshCopilotTokenIfNeeded();
+		return;
+	}
 
 	Log(FString::Printf(TEXT("BridgeService: Sending request %s to Copilot (model: %s)"), *Request.RequestId, *ActiveModelId));
 	PendingRequestTimestamps.Add(Request.RequestId, FPlatformTime::Seconds());
+	NoResponseRetryCounts.Remove(Request.RequestId);
 
 	SendChatCompletion(Request);
 }
@@ -937,7 +1044,22 @@ FString FGitHubCopilotUEBridgeService::CommandTypeToString(ECopilotCommandType T
 
 FString FGitHubCopilotUEBridgeService::BuildSystemPrompt(const FCopilotRequest& Request) const
 {
-	return TEXT("You have tools: read_file, write_file, edit_file, list_directory, search_files, get_project_structure, create_cpp_class, create_blueprint_asset, compile, get_file_info, delete_file. Use them when needed.");
+	FString EngineVer = Request.ProjectContext.EngineVersion.IsEmpty() ? TEXT("5.x") : Request.ProjectContext.EngineVersion;
+	FString ProjectName = Request.ProjectContext.ProjectName.IsEmpty() ? TEXT("Unknown") : Request.ProjectContext.ProjectName;
+	FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+
+	FString Prompt = FString::Printf(
+		TEXT("You are inside Unreal Engine %s, project: %s, directory: %s.\n")
+		TEXT("This is a persistent multi-turn conversation.\n")
+		TEXT("You have tools available. Use them proactively instead of asking the user to check things.\n\n")
+		TEXT("STRICT FORMATTING RULES — NEVER BREAK THESE:\n")
+		TEXT("- NEVER use markdown. No headers (#), no bold (**), no code fences (```), no bullet points (- or *).\n")
+		TEXT("- NEVER use emojis. Not a single one.\n")
+		TEXT("- Write in plain conversational English like a coworker talking to you. No lists, no bullet points, no structured formatting.\n")
+		TEXT("- Just talk normally. Explain things in sentences and paragraphs."),
+		*EngineVer, *ProjectName, *ProjectDir);
+
+	return Prompt;
 }
 
 void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Request, bool bAllowToolCalls)
@@ -955,24 +1077,57 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 
 	Log(FString::Printf(TEXT("BridgeService: Chat completion using model: %s"), *ModelToUse));
 
-	// Build or continue the conversation messages
-	TArray<TSharedPtr<FJsonValue>>& ConvoMessages = ActiveConversations.FindOrAdd(Request.RequestId);
+	// ConversationId MUST be set. BridgeService owns the canonical conversation.
+	// If the request somehow arrives without one, use the one we own — never generate a throwaway key.
+	FString ConvoKey = Request.ConversationId;
+	if (ConvoKey.IsEmpty())
+	{
+		ConvoKey = GetOrCreateConversationId();
+		Log(FString::Printf(TEXT("BridgeService: [CONVO] WARNING — Request arrived with empty ConversationId! Forced to CurrentConversationId: %s"), *ConvoKey));
+	}
 
-	// If this is a new conversation (no messages yet), add system + user messages
+	Log(FString::Printf(TEXT("BridgeService: [CONVO] ConversationId: %s"), *ConvoKey));
+
+	// HARD DIAGNOSTIC — always visible in Output Log
+	UE_LOG(LogGitHubCopilotUE, Warning, TEXT("[CONVO-DIAG] SendChatCompletion: ConvoKey=%s, RequestId=%s, RequestConvoId=%s, CurrentConvoId=%s, ActiveConversations count=%d"),
+		*ConvoKey, *Request.RequestId, *Request.ConversationId, *CurrentConversationId, ActiveConversations.Num());
+
+	// Build or continue the conversation messages
+	TArray<TSharedPtr<FJsonValue>>& ConvoMessages = ActiveConversations.FindOrAdd(ConvoKey);
+
+	// HARD DIAGNOSTIC — message count before we do anything
+	UE_LOG(LogGitHubCopilotUE, Warning, TEXT("[CONVO-DIAG] ConvoMessages for key %s: %d messages BEFORE append"), *ConvoKey, ConvoMessages.Num());
+
 	if (ConvoMessages.Num() == 0)
 	{
-		// System message
+		// Brand new conversation — add system prompt + user message
 		TSharedPtr<FJsonObject> SystemMsg = MakeShareable(new FJsonObject);
 		SystemMsg->SetStringField(TEXT("role"), TEXT("system"));
 		SystemMsg->SetStringField(TEXT("content"), BuildSystemPrompt(Request));
 		ConvoMessages.Add(MakeShareable(new FJsonValueObject(SystemMsg)));
 
-		// User message
-		FString UserContent = Request.UserPrompt;
-		if (UserContent.IsEmpty())
+		Log(FString::Printf(TEXT("BridgeService: [CONVO] NEW conversation %s — system prompt added"), *ConvoKey));
+	}
+	else
+	{
+		// Existing conversation — log the message roles for diagnostics
+		FString RoleSummary;
+		for (const TSharedPtr<FJsonValue>& MsgVal : ConvoMessages)
 		{
-			UserContent = CommandTypeToString(Request.CommandType);
+			if (MsgVal.IsValid() && MsgVal->AsObject().IsValid())
+			{
+				FString Role = MsgVal->AsObject()->GetStringField(TEXT("role"));
+				RoleSummary += Role.Left(1).ToUpper() + TEXT(" ");
+			}
 		}
+		Log(FString::Printf(TEXT("BridgeService: [CONVO] RESUMING conversation %s — %d existing messages [%s]"),
+			*ConvoKey, ConvoMessages.Num(), *RoleSummary.TrimEnd()));
+	}
+
+	// If UserPrompt is non-empty, append a new user turn (handles both new and continuing conversations)
+	if (!Request.UserPrompt.IsEmpty())
+	{
+		FString UserContent = Request.UserPrompt;
 
 		// Append file context if present
 		for (const FCopilotFileTarget& Target : Request.FileTargets)
@@ -987,37 +1142,331 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 			}
 		}
 
+		bool bModelSupportsVision = false;
+		for (const FCopilotModel& ModelInfo : AvailableModels)
+		{
+			if (ModelInfo.Id == ModelToUse)
+			{
+				bModelSupportsVision = ModelInfo.bSupportsVision;
+				break;
+			}
+		}
+
+		bool bUsingMultipartContent = false;
+		TArray<TSharedPtr<FJsonValue>> MultipartContent;
+		auto AddTextPart = [&MultipartContent](const FString& Text)
+		{
+			TSharedPtr<FJsonObject> TextPart = MakeShareable(new FJsonObject);
+			TextPart->SetStringField(TEXT("type"), TEXT("text"));
+			TextPart->SetStringField(TEXT("text"), Text);
+			MultipartContent.Add(MakeShareable(new FJsonValueObject(TextPart)));
+		};
+		auto EnsureMultipartContent = [&]()
+		{
+			if (!bUsingMultipartContent)
+			{
+				AddTextPart(UserContent);
+				bUsingMultipartContent = true;
+			}
+		};
+		auto AppendAttachmentText = [&](const FString& Text)
+		{
+			if (bUsingMultipartContent)
+			{
+				AddTextPart(Text);
+			}
+			else
+			{
+				UserContent += FString::Printf(TEXT("\n\n%s"), *Text);
+			}
+		};
+
+		constexpr int32 MaxInlineAttachmentChars = 24000;
+		constexpr int64 MaxInlineImageBytes = 4 * 1024 * 1024;
+		for (const FCopilotAttachment& Attachment : Request.Attachments)
+		{
+			const FString AttachmentPath = Attachment.FilePath.TrimStartAndEnd();
+			if (AttachmentPath.IsEmpty())
+			{
+				continue;
+			}
+
+			const FString AttachmentName = FPaths::GetCleanFilename(AttachmentPath);
+			if (!FPaths::FileExists(AttachmentPath))
+			{
+				AppendAttachmentText(FString::Printf(TEXT("[Attachment skipped: %s (file not found)]"), *AttachmentName));
+				continue;
+			}
+
+			const FString MimeType = ResolveAttachmentMimeType(Attachment);
+			if (IsImageMimeType(MimeType))
+			{
+				if (!bModelSupportsVision)
+				{
+					AppendAttachmentText(FString::Printf(TEXT("[Image attached but current model is text-only: %s]"), *AttachmentName));
+					continue;
+				}
+
+				TArray<uint8> ImageBytes;
+				if (!FFileHelper::LoadFileToArray(ImageBytes, *AttachmentPath))
+				{
+					AppendAttachmentText(FString::Printf(TEXT("[Attachment skipped: %s (failed to read image)]"), *AttachmentName));
+					continue;
+				}
+
+				if (ImageBytes.Num() <= 0)
+				{
+					AppendAttachmentText(FString::Printf(TEXT("[Attachment skipped: %s (empty image file)]"), *AttachmentName));
+					continue;
+				}
+
+				if (ImageBytes.Num() > MaxInlineImageBytes)
+				{
+					AppendAttachmentText(FString::Printf(TEXT("[Attachment skipped: %s (image exceeds %d MB inline limit)]"), *AttachmentName, MaxInlineImageBytes / (1024 * 1024)));
+					continue;
+				}
+
+				EnsureMultipartContent();
+
+				const FString Base64Data = FBase64::Encode(ImageBytes);
+				TSharedPtr<FJsonObject> ImageUrlObj = MakeShareable(new FJsonObject);
+				ImageUrlObj->SetStringField(TEXT("url"), FString::Printf(TEXT("data:%s;base64,%s"), *MimeType, *Base64Data));
+
+				TSharedPtr<FJsonObject> ImagePart = MakeShareable(new FJsonObject);
+				ImagePart->SetStringField(TEXT("type"), TEXT("image_url"));
+				ImagePart->SetObjectField(TEXT("image_url"), ImageUrlObj);
+				MultipartContent.Add(MakeShareable(new FJsonValueObject(ImagePart)));
+				continue;
+			}
+
+			if (!IsLikelyTextAttachment(AttachmentPath))
+			{
+				AppendAttachmentText(FString::Printf(TEXT("[Attachment noted but not inlined (unsupported binary type): %s]"), *AttachmentName));
+				continue;
+			}
+
+			FString AttachmentContent;
+			if (!FFileHelper::LoadFileToString(AttachmentContent, *AttachmentPath))
+			{
+				AppendAttachmentText(FString::Printf(TEXT("[Attachment skipped: %s (failed to read text)]"), *AttachmentName));
+				continue;
+			}
+
+			bool bWasTruncated = false;
+			if (AttachmentContent.Len() > MaxInlineAttachmentChars)
+			{
+				AttachmentContent = AttachmentContent.Left(MaxInlineAttachmentChars);
+				bWasTruncated = true;
+			}
+
+			AppendAttachmentText(FString::Printf(
+				TEXT("Attachment: %s\n```text\n%s\n```%s"),
+				*AttachmentName,
+				*AttachmentContent,
+				bWasTruncated ? TEXT("\n[Truncated for size]") : TEXT("")));
+		}
+
 		TSharedPtr<FJsonObject> UserMsg = MakeShareable(new FJsonObject);
 		UserMsg->SetStringField(TEXT("role"), TEXT("user"));
-		UserMsg->SetStringField(TEXT("content"), UserContent);
+		if (bUsingMultipartContent)
+		{
+			UserMsg->SetArrayField(TEXT("content"), MultipartContent);
+		}
+		else
+		{
+			UserMsg->SetStringField(TEXT("content"), UserContent);
+		}
 		ConvoMessages.Add(MakeShareable(new FJsonValueObject(UserMsg)));
+
+		Log(FString::Printf(TEXT("BridgeService: Appended user turn (%d chars) to conversation %s (now %d messages)"),
+			Request.UserPrompt.Len(), *ConvoKey, ConvoMessages.Num()));
 	}
-	// If continuing (tool results already appended), messages are ready
+	// else: tool call continuation — messages already have assistant + tool results
+
+	// ── Conversation trimming ──
+	// If the serialized conversation exceeds a safe payload threshold, trim older
+	// messages (preserving system prompt at index 0 and the most recent turns).
+	// This prevents 400 errors from exceeding the model's context window.
+	{
+		constexpr int32 MaxPayloadChars = 800000; // ~800KB safe limit for serialized JSON
+		constexpr int32 MinMessagesToKeep = 6;     // system + at least 2 recent user/assistant pairs + current
+
+		auto EstimatePayloadSize = [](const TArray<TSharedPtr<FJsonValue>>& Msgs) -> int32
+		{
+			int32 Total = 0;
+			for (const TSharedPtr<FJsonValue>& MsgVal : Msgs)
+			{
+				if (MsgVal.IsValid() && MsgVal->AsObject().IsValid())
+				{
+					const TSharedPtr<FJsonObject>& MsgObj = MsgVal->AsObject();
+					if (MsgObj->HasTypedField<EJson::String>(TEXT("content")))
+					{
+						Total += MsgObj->GetStringField(TEXT("content")).Len();
+					}
+					else if (MsgObj->HasTypedField<EJson::Array>(TEXT("content")))
+					{
+						for (const auto& Part : MsgObj->GetArrayField(TEXT("content")))
+						{
+							if (Part.IsValid() && Part->AsObject().IsValid())
+							{
+								const TSharedPtr<FJsonObject>& PartObj = Part->AsObject();
+								if (PartObj->HasField(TEXT("text")))
+									Total += PartObj->GetStringField(TEXT("text")).Len();
+								if (PartObj->HasField(TEXT("url")))
+									Total += PartObj->GetStringField(TEXT("url")).Len();
+							}
+						}
+					}
+					Total += 100; // overhead for role, JSON structure
+				}
+			}
+			return Total;
+		};
+
+		int32 PayloadEstimate = EstimatePayloadSize(ConvoMessages);
+		if (PayloadEstimate > MaxPayloadChars && ConvoMessages.Num() > MinMessagesToKeep)
+		{
+			Log(FString::Printf(TEXT("BridgeService: [CONVO] Payload too large (%d chars, %d msgs) — trimming older messages"),
+				PayloadEstimate, ConvoMessages.Num()));
+
+			// Keep system prompt (index 0) and the most recent messages
+			while (PayloadEstimate > MaxPayloadChars && ConvoMessages.Num() > MinMessagesToKeep)
+			{
+				// Remove the oldest non-system message (index 1)
+				ConvoMessages.RemoveAt(1);
+				PayloadEstimate = EstimatePayloadSize(ConvoMessages);
+			}
+
+			Log(FString::Printf(TEXT("BridgeService: [CONVO] Trimmed to %d messages (%d chars)"),
+				ConvoMessages.Num(), PayloadEstimate));
+		}
+	}
 
 	// Build request body
 	TSharedPtr<FJsonObject> JsonBody = MakeShareable(new FJsonObject);
 	JsonBody->SetStringField(TEXT("model"), ModelToUse);
-	JsonBody->SetArrayField(TEXT("messages"), ConvoMessages);
 
-	if (bAllowToolCalls)
+	// Check if this model requires /responses format vs /chat/completions
+	bool bUseResponsesFormat = false;
+	for (const FCopilotModel& M : AvailableModels)
 	{
-		// Add tool definitions — this is what makes it agentic
-		TArray<TSharedPtr<FJsonValue>> Tools = FGitHubCopilotUEToolExecutor::BuildToolDefinitions();
-		JsonBody->SetArrayField(TEXT("tools"), Tools);
+		if (M.Id == ModelToUse)
+		{
+			bUseResponsesFormat = M.RequiresResponsesFormat();
+			break;
+		}
+	}
 
-		// Explicitly tell the API to allow tool calls
-		JsonBody->SetStringField(TEXT("tool_choice"), TEXT("auto"));
-		Log(FString::Printf(TEXT("BridgeService: Sending %d tools, %d messages, model=%s"), Tools.Num(), ConvoMessages.Num(), *ModelToUse));
+	if (bUseResponsesFormat)
+	{
+		// /responses endpoint format: { model, input (string or array of items) }
+		// Convert messages to a single input string
+		FString InputText;
+		for (const TSharedPtr<FJsonValue>& MsgVal : ConvoMessages)
+		{
+			const TSharedPtr<FJsonObject>& Msg = MsgVal->AsObject();
+			if (!Msg.IsValid()) continue;
+
+			FString Role = Msg->GetStringField(TEXT("role"));
+			FString Content;
+
+			// Content can be string or array (multipart)
+			if (Msg->HasTypedField<EJson::String>(TEXT("content")))
+			{
+				Content = Msg->GetStringField(TEXT("content"));
+			}
+			else if (Msg->HasTypedField<EJson::Array>(TEXT("content")))
+			{
+				// Extract text parts from multipart content
+				const TArray<TSharedPtr<FJsonValue>>& Parts = Msg->GetArrayField(TEXT("content"));
+				for (const auto& Part : Parts)
+				{
+					const TSharedPtr<FJsonObject>& PartObj = Part->AsObject();
+					if (PartObj.IsValid() && PartObj->GetStringField(TEXT("type")) == TEXT("text"))
+					{
+						Content += PartObj->GetStringField(TEXT("text"));
+					}
+				}
+			}
+
+			if (!Content.IsEmpty())
+			{
+				if (Role == TEXT("system"))
+				{
+					InputText += FString::Printf(TEXT("[System]\n%s\n\n"), *Content);
+				}
+				else if (Role == TEXT("user"))
+				{
+					InputText += FString::Printf(TEXT("[User]\n%s\n\n"), *Content);
+				}
+				else if (Role == TEXT("assistant"))
+				{
+					InputText += FString::Printf(TEXT("[Assistant]\n%s\n\n"), *Content);
+				}
+				else if (Role == TEXT("tool"))
+				{
+					FString ToolName = Msg->HasField(TEXT("name")) ? Msg->GetStringField(TEXT("name")) : TEXT("tool");
+					InputText += FString::Printf(TEXT("[Tool Result: %s]\n%s\n\n"), *ToolName, *Content);
+				}
+			}
+		}
+
+		JsonBody->SetStringField(TEXT("input"), InputText);
+
+		if (bAllowToolCalls)
+		{
+			TArray<TSharedPtr<FJsonValue>> Tools = FGitHubCopilotUEToolExecutor::BuildToolDefinitions();
+			JsonBody->SetArrayField(TEXT("tools"), Tools);
+			Log(FString::Printf(TEXT("BridgeService: [/responses] Sending %d tools, input=%d chars, model=%s"), Tools.Num(), InputText.Len(), *ModelToUse));
+		}
+		else
+		{
+			Log(FString::Printf(TEXT("BridgeService: [/responses] Final answer mode, input=%d chars, model=%s"), InputText.Len(), *ModelToUse));
+		}
 	}
 	else
 	{
-		JsonBody->SetStringField(TEXT("tool_choice"), TEXT("none"));
-		Log(FString::Printf(TEXT("BridgeService: Forcing final answer with tools disabled, messages=%d, model=%s"), ConvoMessages.Num(), *ModelToUse));
+		// Standard /chat/completions format
+		JsonBody->SetArrayField(TEXT("messages"), ConvoMessages);
+		JsonBody->SetNumberField(TEXT("temperature"), 0.1);
+
+		// Use configurable max output tokens (default: 16384)
+		const UGitHubCopilotUESettings* Settings = UGitHubCopilotUESettings::Get();
+		const int32 MaxOutputTokens = Settings ? FMath::Max(1024, Settings->MaxOutputTokens) : 16384;
+		JsonBody->SetNumberField(TEXT("max_tokens"), MaxOutputTokens);
+
+		if (bAllowToolCalls)
+		{
+			TArray<TSharedPtr<FJsonValue>> Tools = FGitHubCopilotUEToolExecutor::BuildToolDefinitions();
+			JsonBody->SetArrayField(TEXT("tools"), Tools);
+			JsonBody->SetStringField(TEXT("tool_choice"), TEXT("auto"));
+			Log(FString::Printf(TEXT("BridgeService: Sending %d tools, %d messages, model=%s"), Tools.Num(), ConvoMessages.Num(), *ModelToUse));
+		}
+		else
+		{
+			JsonBody->SetStringField(TEXT("tool_choice"), TEXT("none"));
+			Log(FString::Printf(TEXT("BridgeService: Forcing final answer with tools disabled, messages=%d, model=%s"), ConvoMessages.Num(), *ModelToUse));
+		}
 	}
 
 	FString RequestBody;
-	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RequestBody);
+	TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+		TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&RequestBody);
 	FJsonSerializer::Serialize(JsonBody.ToSharedRef(), Writer);
+	Writer->Close();
+
+	// Log payload size + preview for debugging
+	Log(FString::Printf(TEXT("BridgeService: Request payload size: %d chars, endpoint: %s"),
+		RequestBody.Len(), *GetEndpointURLForModel(ModelToUse)));
+	if (RequestBody.Len() > 0)
+	{
+		FString Preview = RequestBody.Left(500);
+		Log(FString::Printf(TEXT("BridgeService: Body preview: %s"), *Preview));
+	}
+	if (RequestBody.Len() > 100000)
+	{
+		Log(TEXT("BridgeService: WARNING - Very large request payload (>100KB). May cause transport issues."));
+	}
 
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> HttpReq = FHttpModule::Get().CreateRequest();
 	HttpReq->SetURL(GetEndpointURLForModel(ModelToUse));
@@ -1026,14 +1475,15 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 	HttpReq->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
 	HttpReq->SetHeader(TEXT("Accept"), TEXT("application/json"));
 	HttpReq->SetHeader(TEXT("Copilot-Integration-Id"), TEXT("vscode-chat"));
-	HttpReq->SetHeader(TEXT("Editor-Version"), TEXT("vscode/1.104.3"));
-	HttpReq->SetHeader(TEXT("Editor-Plugin-Version"), TEXT("copilot-chat/0.26.7"));
-	HttpReq->SetHeader(TEXT("User-Agent"), TEXT("GitHubCopilotChat/0.26.7"));
+	HttpReq->SetHeader(TEXT("Editor-Version"), TEXT("vscode/1.103.2"));
+	HttpReq->SetHeader(TEXT("Editor-Plugin-Version"), TEXT("copilot-chat/0.27.1"));
+	HttpReq->SetHeader(TEXT("User-Agent"), TEXT("GitHubCopilotChat/0.27.1"));
 	HttpReq->SetHeader(TEXT("OpenAI-Intent"), TEXT("conversation-panel"));
-	HttpReq->SetHeader(TEXT("X-GitHub-Api-Version"), TEXT("2025-04-01"));
 	HttpReq->SetHeader(TEXT("X-Initiator"), TEXT("user"));
 	HttpReq->SetHeader(TEXT("X-Request-Id"), FGuid::NewGuid().ToString());
 	HttpReq->SetContentAsString(RequestBody);
+	// Do NOT manually set Content-Length — UE's HTTP module calculates it
+	// from the UTF-8 byte array set by SetContentAsString.
 
 	const UGitHubCopilotUESettings* Settings = UGitHubCopilotUESettings::Get();
 	if (Settings)
@@ -1042,25 +1492,78 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 	}
 
 	FString RequestId = Request.RequestId;
-	HttpReq->OnProcessRequestComplete().BindRaw(this, &FGitHubCopilotUEBridgeService::OnChatCompletionResponse, RequestId);
+	FString ConvoId = ConvoKey;
+	// HARD DIAGNOSTIC — final state before sending
+	UE_LOG(LogGitHubCopilotUE, Warning, TEXT("[CONVO-DIAG] SENDING: ConvoKey=%s, total messages=%d, bound ConvoId=%s"),
+		*ConvoKey, ConvoMessages.Num(), *ConvoId);
+
+	HttpReq->OnProcessRequestComplete().BindRaw(this, &FGitHubCopilotUEBridgeService::OnChatCompletionResponse, RequestId, ConvoId);
 	HttpReq->ProcessRequest();
 }
 
-void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr HttpReq, FHttpResponsePtr HttpResp, bool bSuccess, FString RequestId)
+void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr HttpReq, FHttpResponsePtr HttpResp, bool bSuccess, FString RequestId, FString ConversationId)
 {
+	// HARD DIAGNOSTIC
+	const TArray<TSharedPtr<FJsonValue>>* DiagConvo = ActiveConversations.Find(ConversationId);
+	UE_LOG(LogGitHubCopilotUE, Warning, TEXT("[CONVO-DIAG] OnResponse: ConversationId=%s, found_in_map=%s, msg_count=%d, ActiveConversations_count=%d"),
+		*ConversationId, DiagConvo ? TEXT("YES") : TEXT("NO"), DiagConvo ? DiagConvo->Num() : -1, ActiveConversations.Num());
+
 	FCopilotResponse Response;
 	Response.RequestId = RequestId;
 	Response.Timestamp = FDateTime::Now().ToString();
 
 	if (!bSuccess || !HttpResp.IsValid())
 	{
+		const int32 RequestStatus = HttpReq.IsValid() ? static_cast<int32>(HttpReq->GetStatus()) : -1;
+		const FString RequestUrl = HttpReq.IsValid() ? HttpReq->GetURL() : TEXT("unknown");
+		int32& RetryCount = NoResponseRetryCounts.FindOrAdd(RequestId);
+		if (RetryCount < MaxNoResponseRetries)
+		{
+			++RetryCount;
+			const bool bAllowToolCalls = !ForcedFinalResponseRequestIds.Contains(RequestId);
+			PendingRequestTimestamps.Add(RequestId, FPlatformTime::Seconds());
+			Log(FString::Printf(
+				TEXT("BridgeService: Request %s got no HTTP response (status=%d, url=%s), retrying once (%d/%d), tools=%s"),
+				*RequestId,
+				RequestStatus,
+				*RequestUrl,
+				RetryCount,
+				MaxNoResponseRetries,
+				bAllowToolCalls ? TEXT("on") : TEXT("off")));
+
+			FCopilotRequest RetryRequest;
+			RetryRequest.RequestId = RequestId;
+			RetryRequest.ConversationId = ConversationId;
+			RetryRequest.CommandType = ECopilotCommandType::Ask;
+
+			// Token may have expired — refresh before retry
+			if (IsCopilotTokenExpired())
+			{
+				Log(TEXT("BridgeService: Token expired before retry — queuing retry after refresh"));
+				QueuedRequestsAwaitingToken.Add(TPair<FCopilotRequest, bool>(RetryRequest, bAllowToolCalls));
+				RefreshCopilotTokenIfNeeded();
+			}
+			else
+			{
+				SendChatCompletion(RetryRequest, bAllowToolCalls);
+			}
+			return;
+		}
+
 		PendingRequestTimestamps.Remove(RequestId);
-		ActiveConversations.Remove(RequestId);
+		// Don't remove ActiveConversations — conversation persists across errors
 		ToolCallIterations.Remove(RequestId);
 		ForcedFinalResponseRequestIds.Remove(RequestId);
+		NoResponseRetryCounts.Remove(RequestId);
 		Response.ResultStatus = ECopilotResultStatus::Failure;
-		Response.ErrorMessage = TEXT("Request to Copilot failed - no response");
-		Log(FString::Printf(TEXT("BridgeService: Request %s failed"), *RequestId));
+		Response.ErrorMessage = FString::Printf(
+			TEXT("Request to Copilot failed after retry (no HTTP response, request_status=%d)."),
+			RequestStatus);
+		Log(FString::Printf(
+			TEXT("BridgeService: Request %s failed after retry (no HTTP response, status=%d, url=%s)"),
+			*RequestId,
+			RequestStatus,
+			*RequestUrl));
 		OnResponseReceived.Broadcast(Response);
 		return;
 	}
@@ -1078,9 +1581,10 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 	if (!EHttpResponseCodes::IsOk(StatusCode))
 	{
 		PendingRequestTimestamps.Remove(RequestId);
-		ActiveConversations.Remove(RequestId);
+		// Don't remove ActiveConversations — conversation persists across errors for retry
 		ToolCallIterations.Remove(RequestId);
 		ForcedFinalResponseRequestIds.Remove(RequestId);
+		NoResponseRetryCounts.Remove(RequestId);
 		Response.ResultStatus = ECopilotResultStatus::Failure;
 		Response.ErrorMessage = FString::Printf(TEXT("Copilot API error (HTTP %d): %s"), StatusCode, *Body.Left(500));
 		Log(FString::Printf(TEXT("BridgeService: Request %s failed - HTTP %d"), *RequestId, StatusCode));
@@ -1115,9 +1619,9 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 	if (!FJsonSerializer::Deserialize(Reader, Json) || !Json.IsValid())
 	{
 		PendingRequestTimestamps.Remove(RequestId);
-		ActiveConversations.Remove(RequestId);
 		ToolCallIterations.Remove(RequestId);
 		ForcedFinalResponseRequestIds.Remove(RequestId);
+		NoResponseRetryCounts.Remove(RequestId);
 		Response.ResultStatus = ECopilotResultStatus::Failure;
 		Response.ErrorMessage = TEXT("Failed to parse Copilot response JSON");
 		OnResponseReceived.Broadcast(Response);
@@ -1133,9 +1637,9 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 	if (!Json->TryGetArrayField(TEXT("choices"), Choices) || Choices->Num() == 0)
 	{
 		PendingRequestTimestamps.Remove(RequestId);
-		ActiveConversations.Remove(RequestId);
 		ToolCallIterations.Remove(RequestId);
 		ForcedFinalResponseRequestIds.Remove(RequestId);
+		NoResponseRetryCounts.Remove(RequestId);
 		Response.ResultStatus = ECopilotResultStatus::Failure;
 		Response.ErrorMessage = TEXT("No choices in Copilot response");
 		OnResponseReceived.Broadcast(Response);
@@ -1200,6 +1704,62 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 		PrefixContent = ContentMessage->HasField(TEXT("content")) ? ContentMessage->GetStringField(TEXT("content")) : TEXT("");
 	}
 
+	// ── Extract and broadcast thinking/reasoning content ──
+	// Models may return thinking in several formats:
+	//   1. "reasoning_content" field on the message (DeepSeek, some OpenAI)
+	//   2. content as array with {type:"thinking", thinking:"..."} parts (Claude)
+	//   3. Separate choice with only content (Claude split-choice) — already captured as PrefixContent
+	for (const TSharedPtr<FJsonValue>& ChoiceVal : *Choices)
+	{
+		TSharedPtr<FJsonObject> ChoiceObj = ChoiceVal->AsObject();
+		if (!ChoiceObj.IsValid()) continue;
+		TSharedPtr<FJsonObject> Msg = ChoiceObj->GetObjectField(TEXT("message"));
+		if (!Msg.IsValid()) continue;
+
+		// Format 1: reasoning_content field
+		if (Msg->HasField(TEXT("reasoning_content")))
+		{
+			FString Reasoning = Msg->GetStringField(TEXT("reasoning_content"));
+			if (!Reasoning.IsEmpty())
+			{
+				// Truncate very long reasoning for display
+				FString Display = Reasoning.Len() > 300 ? Reasoning.Left(300) + TEXT("...") : Reasoning;
+				Display.ReplaceInline(TEXT("\n"), TEXT(" "));
+				OnToolActivity.Broadcast(FString::Printf(TEXT("Thinking: %s"), *Display));
+			}
+		}
+
+		// Format 2: content as array with thinking parts
+		if (Msg->HasTypedField<EJson::Array>(TEXT("content")))
+		{
+			const TArray<TSharedPtr<FJsonValue>>& ContentParts = Msg->GetArrayField(TEXT("content"));
+			for (const auto& PartVal : ContentParts)
+			{
+				TSharedPtr<FJsonObject> Part = PartVal->AsObject();
+				if (!Part.IsValid()) continue;
+				FString PartType = Part->HasField(TEXT("type")) ? Part->GetStringField(TEXT("type")) : TEXT("");
+				if (PartType == TEXT("thinking") && Part->HasField(TEXT("thinking")))
+				{
+					FString Thinking = Part->GetStringField(TEXT("thinking"));
+					if (!Thinking.IsEmpty())
+					{
+						FString Display = Thinking.Len() > 300 ? Thinking.Left(300) + TEXT("...") : Thinking;
+						Display.ReplaceInline(TEXT("\n"), TEXT(" "));
+						OnToolActivity.Broadcast(FString::Printf(TEXT("Thinking: %s"), *Display));
+					}
+				}
+			}
+		}
+	}
+
+	// Format 3: If PrefixContent exists during tool calls, that's the model's reasoning
+	if (!PrefixContent.IsEmpty() && ToolCallMessage.IsValid())
+	{
+		FString Display = PrefixContent.Len() > 300 ? PrefixContent.Left(300) + TEXT("...") : PrefixContent;
+		Display.ReplaceInline(TEXT("\n"), TEXT(" "));
+		OnToolActivity.Broadcast(FString::Printf(TEXT("Thinking: %s"), *Display));
+	}
+
 	// Debug logging
 	FString ResponseModel = Json->HasField(TEXT("model")) ? Json->GetStringField(TEXT("model")) : TEXT("unknown");
 	bool bHasToolCalls = Message.IsValid() && Message->HasField(TEXT("tool_calls"));
@@ -1209,9 +1769,9 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 	if (!Message.IsValid())
 	{
 		PendingRequestTimestamps.Remove(RequestId);
-		ActiveConversations.Remove(RequestId);
 		ToolCallIterations.Remove(RequestId);
 		ForcedFinalResponseRequestIds.Remove(RequestId);
+		NoResponseRetryCounts.Remove(RequestId);
 		Response.ResultStatus = ECopilotResultStatus::Failure;
 		Response.ErrorMessage = TEXT("No message in response choices");
 		OnResponseReceived.Broadcast(Response);
@@ -1233,7 +1793,7 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 		}
 
 		// Append the assistant's message (with tool_calls) to conversation
-		TArray<TSharedPtr<FJsonValue>>& ConvoMessages = ActiveConversations.FindOrAdd(RequestId);
+		TArray<TSharedPtr<FJsonValue>>& ConvoMessages = ActiveConversations.FindOrAdd(ConversationId);
 		ConvoMessages.Add(MakeShareable(new FJsonValueObject(Message)));
 
 		// Execute each tool call and append results
@@ -1258,7 +1818,42 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 				ToolArgs = MakeShareable(new FJsonObject);
 			}
 
-			// Execute the tool
+			// Execute the tool — broadcast activity to UI
+			FString ActivitySummary;
+			if (ToolName == TEXT("web_search"))
+			{
+				FString Query = ToolArgs->HasField(TEXT("query")) ? ToolArgs->GetStringField(TEXT("query")) : TEXT("...");
+				ActivitySummary = FString::Printf(TEXT("Searching: %s"), *Query);
+			}
+			else if (ToolName == TEXT("read_file"))
+			{
+				FString Path = ToolArgs->HasField(TEXT("path")) ? ToolArgs->GetStringField(TEXT("path")) : TEXT("...");
+				ActivitySummary = FString::Printf(TEXT("Reading: %s"), *FPaths::GetCleanFilename(Path));
+			}
+			else if (ToolName == TEXT("write_file") || ToolArgs->HasField(TEXT("path")))
+			{
+				FString Path = ToolArgs->HasField(TEXT("path")) ? ToolArgs->GetStringField(TEXT("path")) : TEXT("...");
+				ActivitySummary = FString::Printf(TEXT("Writing: %s"), *FPaths::GetCleanFilename(Path));
+			}
+			else if (ToolName == TEXT("execute_console_command"))
+			{
+				FString Cmd = ToolArgs->HasField(TEXT("command")) ? ToolArgs->GetStringField(TEXT("command")) : TEXT("...");
+				ActivitySummary = FString::Printf(TEXT("Running command: %s"), *Cmd.Left(80));
+			}
+			else if (ToolName == TEXT("create_mesh") || ToolName == TEXT("create_material") || ToolName == TEXT("add_modifier"))
+			{
+				ActivitySummary = FString::Printf(TEXT("Using tool: %s"), *ToolName);
+			}
+			else if (ToolName == TEXT("capture_viewport") || ToolName == TEXT("render_preview"))
+			{
+				ActivitySummary = TEXT("Capturing viewport...");
+			}
+			else
+			{
+				ActivitySummary = FString::Printf(TEXT("Using tool: %s"), *ToolName);
+			}
+			OnToolActivity.Broadcast(ActivitySummary);
+
 			Log(FString::Printf(TEXT("BridgeService: Executing tool: %s"), *ToolName));
 			UE_LOG(LogGitHubCopilotUE, Display, TEXT("  [Tool] %s(...)"), *ToolName);
 
@@ -1272,6 +1867,11 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 				ToolResult = TEXT("Error: Tool executor not available");
 			}
 
+			// Broadcast completion
+			FString ResultPreview = ToolResult.Left(120);
+			ResultPreview.ReplaceInline(TEXT("\n"), TEXT(" "));
+			OnToolActivity.Broadcast(FString::Printf(TEXT("  Done: %s"), *ResultPreview));
+
 			Log(FString::Printf(TEXT("BridgeService: Tool %s returned %d chars"), *ToolName, ToolResult.Len()));
 
 			// Append tool result to conversation
@@ -1281,6 +1881,55 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 			ToolResultMsg->SetStringField(TEXT("name"), ToolName);
 			ToolResultMsg->SetStringField(TEXT("content"), ToolResult);
 			ConvoMessages.Add(MakeShareable(new FJsonValueObject(ToolResultMsg)));
+
+			// If a tool produced a render/screenshot, inject the image as a
+			// vision message so the model can see and analyze it
+			if (ToolResult.StartsWith(TEXT("__RENDER_IMAGE__:")))
+			{
+				FString ImageLine = ToolResult;
+				int32 NewlineIdx;
+				if (ImageLine.FindChar(TEXT('\n'), NewlineIdx))
+				{
+					ImageLine = ImageLine.Left(NewlineIdx);
+				}
+				FString ImagePath = ImageLine.Replace(TEXT("__RENDER_IMAGE__:"), TEXT("")).TrimStartAndEnd();
+
+				TArray<uint8> ImageData;
+				if (FFileHelper::LoadFileToArray(ImageData, *ImagePath))
+				{
+					FString Base64 = FBase64::Encode(ImageData);
+					FString Ext = FPaths::GetExtension(ImagePath).ToLower();
+					FString Mime = (Ext == TEXT("jpg") || Ext == TEXT("jpeg")) ? TEXT("image/jpeg") : TEXT("image/png");
+
+					// Build multipart user message: [{type:text}, {type:image_url}]
+					TSharedPtr<FJsonObject> TextPart = MakeShareable(new FJsonObject);
+					TextPart->SetStringField(TEXT("type"), TEXT("text"));
+					TextPart->SetStringField(TEXT("text"), TEXT("Here is the captured image. Analyze what you see and describe it."));
+
+					TSharedPtr<FJsonObject> ImageUrlInner = MakeShareable(new FJsonObject);
+					ImageUrlInner->SetStringField(TEXT("url"), FString::Printf(TEXT("data:%s;base64,%s"), *Mime, *Base64));
+
+					TSharedPtr<FJsonObject> ImagePart = MakeShareable(new FJsonObject);
+					ImagePart->SetStringField(TEXT("type"), TEXT("image_url"));
+					ImagePart->SetObjectField(TEXT("image_url"), ImageUrlInner);
+
+					TArray<TSharedPtr<FJsonValue>> ContentArray;
+					ContentArray.Add(MakeShareable(new FJsonValueObject(TextPart)));
+					ContentArray.Add(MakeShareable(new FJsonValueObject(ImagePart)));
+
+					TSharedPtr<FJsonObject> VisionMsg = MakeShareable(new FJsonObject);
+					VisionMsg->SetStringField(TEXT("role"), TEXT("user"));
+					VisionMsg->SetArrayField(TEXT("content"), ContentArray);
+					ConvoMessages.Add(MakeShareable(new FJsonValueObject(VisionMsg)));
+
+					Log(FString::Printf(TEXT("BridgeService: Injected render image for vision analysis (%d bytes, %s)"),
+						ImageData.Num(), *Mime));
+				}
+				else
+				{
+					Log(FString::Printf(TEXT("BridgeService: Failed to load render image: %s"), *ImagePath));
+				}
+			}
 		}
 
 		// Check iteration guard
@@ -1305,6 +1954,7 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 
 				FCopilotRequest ContinuationRequest;
 				ContinuationRequest.RequestId = RequestId;
+				ContinuationRequest.ConversationId = ConversationId;
 				ContinuationRequest.CommandType = ECopilotCommandType::Ask;
 				SendChatCompletion(ContinuationRequest, false);
 				return;
@@ -1312,9 +1962,9 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 
 			// If the model still keeps looping after forced-final mode, return best effort text.
 			PendingRequestTimestamps.Remove(RequestId);
-			ActiveConversations.Remove(RequestId);
 			ToolCallIterations.Remove(RequestId);
 			ForcedFinalResponseRequestIds.Remove(RequestId);
+			NoResponseRetryCounts.Remove(RequestId);
 			Response.ResultStatus = ECopilotResultStatus::Success;
 			Response.ResponseText = PrefixContent.IsEmpty()
 				? TEXT("I stopped repeated tool-call looping and returned control. Please retry with a narrower prompt or explicit target path.")
@@ -1329,6 +1979,7 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 
 		FCopilotRequest ContinuationRequest;
 		ContinuationRequest.RequestId = RequestId;
+		ContinuationRequest.ConversationId = ConversationId;
 		ContinuationRequest.CommandType = ECopilotCommandType::Ask;
 		// Don't rebuild messages — SendChatCompletion will use ActiveConversations
 		SendChatCompletion(ContinuationRequest, true);
@@ -1341,9 +1992,9 @@ HandleNormalResponse:
 	// ════════════════════════════════════════════════════════════════
 
 	PendingRequestTimestamps.Remove(RequestId);
-	ActiveConversations.Remove(RequestId);
 	ToolCallIterations.Remove(RequestId);
 	ForcedFinalResponseRequestIds.Remove(RequestId);
+	NoResponseRetryCounts.Remove(RequestId);
 
 	FString Content = Message->HasField(TEXT("content")) ? Message->GetStringField(TEXT("content")) : TEXT("");
 
@@ -1351,6 +2002,19 @@ HandleNormalResponse:
 	if (Content.IsEmpty() && !PrefixContent.IsEmpty())
 	{
 		Content = PrefixContent;
+	}
+
+	// ALWAYS append assistant message to conversation for multi-turn persistence.
+	// Even if content is empty, we need the message in the chain so the model
+	// sees proper turn-taking on subsequent requests.
+	{
+		TArray<TSharedPtr<FJsonValue>>& ConvoMessages = ActiveConversations.FindOrAdd(ConversationId);
+		TSharedPtr<FJsonObject> AssistantMsg = MakeShareable(new FJsonObject);
+		AssistantMsg->SetStringField(TEXT("role"), TEXT("assistant"));
+		AssistantMsg->SetStringField(TEXT("content"), Content.IsEmpty() ? TEXT("(no response)") : Content);
+		ConvoMessages.Add(MakeShareable(new FJsonValueObject(AssistantMsg)));
+		Log(FString::Printf(TEXT("BridgeService: [CONVO] %s — appended assistant response, total messages: %d"),
+			*ConversationId, ConvoMessages.Num()));
 	}
 
 	if (!Content.IsEmpty())
@@ -1373,6 +2037,131 @@ HandleNormalResponse:
 
 	Log(FString::Printf(TEXT("BridgeService: Request %s complete (%d chars)"), *RequestId, Response.ResponseText.Len()));
 	OnResponseReceived.Broadcast(Response);
+}
+
+// ============================================================================
+// Conversation management
+// ============================================================================
+
+void FGitHubCopilotUEBridgeService::ClearConversation(const FString& InConversationId)
+{
+	ActiveConversations.Remove(InConversationId);
+	Log(FString::Printf(TEXT("BridgeService: Cleared conversation %s"), *InConversationId));
+}
+
+FString FGitHubCopilotUEBridgeService::GetOrCreateConversationId()
+{
+	if (CurrentConversationId.IsEmpty())
+	{
+		CurrentConversationId = FGuid::NewGuid().ToString(EGuidFormats::Short);
+		Log(FString::Printf(TEXT("BridgeService: Created new conversation ID: %s"), *CurrentConversationId));
+	}
+	else
+	{
+		Log(FString::Printf(TEXT("BridgeService: Resuming existing conversation ID: %s (messages: %d)"),
+			*CurrentConversationId, GetConversationMessageCount(CurrentConversationId)));
+	}
+	return CurrentConversationId;
+}
+
+FString FGitHubCopilotUEBridgeService::ResetConversationId()
+{
+	if (!CurrentConversationId.IsEmpty())
+	{
+		ClearConversation(CurrentConversationId);
+	}
+	CurrentConversationId = FGuid::NewGuid().ToString(EGuidFormats::Short);
+	Log(FString::Printf(TEXT("BridgeService: Reset conversation — new ID: %s"), *CurrentConversationId));
+	return CurrentConversationId;
+}
+
+int32 FGitHubCopilotUEBridgeService::GetConversationMessageCount(const FString& InConversationId) const
+{
+	const TArray<TSharedPtr<FJsonValue>>* ConvoPtr = ActiveConversations.Find(InConversationId);
+	return ConvoPtr ? ConvoPtr->Num() : 0;
+}
+
+// ============================================================================
+// Conversation persistence (save/load to disk)
+// ============================================================================
+
+FString FGitHubCopilotUEBridgeService::GetConversationCachePath() const
+{
+	return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CopilotConversation.json"));
+}
+
+void FGitHubCopilotUEBridgeService::SetChatTranscript(const FString& Transcript)
+{
+	CachedChatTranscript = Transcript;
+}
+
+FString FGitHubCopilotUEBridgeService::GetChatTranscript() const
+{
+	return CachedChatTranscript;
+}
+
+void FGitHubCopilotUEBridgeService::SaveConversationCache()
+{
+	if (CurrentConversationId.IsEmpty())
+	{
+		return;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* ConvoPtr = ActiveConversations.Find(CurrentConversationId);
+	if (!ConvoPtr || ConvoPtr->Num() == 0)
+	{
+		return;
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShareable(new FJsonObject);
+	Root->SetStringField(TEXT("conversation_id"), CurrentConversationId);
+	Root->SetStringField(TEXT("chat_transcript"), CachedChatTranscript);
+	Root->SetArrayField(TEXT("messages"), *ConvoPtr);
+
+	FString Output;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Output);
+	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+
+	if (FFileHelper::SaveStringToFile(Output, *GetConversationCachePath()))
+	{
+		Log(FString::Printf(TEXT("BridgeService: Saved conversation (%d messages, %d chars transcript) to disk"),
+			ConvoPtr->Num(), CachedChatTranscript.Len()));
+	}
+}
+
+void FGitHubCopilotUEBridgeService::LoadConversationCache()
+{
+	FString Content;
+	if (!FFileHelper::LoadFileToString(Content, *GetConversationCachePath()))
+	{
+		return;
+	}
+
+	TSharedPtr<FJsonObject> Root;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Content);
+	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
+	{
+		Log(TEXT("BridgeService: Failed to parse conversation cache"));
+		return;
+	}
+
+	FString SavedConvoId = Root->GetStringField(TEXT("conversation_id"));
+	CachedChatTranscript = Root->HasField(TEXT("chat_transcript")) ? Root->GetStringField(TEXT("chat_transcript")) : TEXT("");
+
+	const TArray<TSharedPtr<FJsonValue>>* MessagesArray;
+	if (!Root->TryGetArrayField(TEXT("messages"), MessagesArray) || MessagesArray->Num() == 0)
+	{
+		Log(TEXT("BridgeService: Conversation cache has no messages, skipping"));
+		return;
+	}
+
+	// Restore the conversation
+	CurrentConversationId = SavedConvoId;
+	TArray<TSharedPtr<FJsonValue>>& ConvoMessages = ActiveConversations.FindOrAdd(CurrentConversationId);
+	ConvoMessages = *MessagesArray;
+
+	Log(FString::Printf(TEXT("BridgeService: Restored conversation %s from disk (%d messages, %d chars transcript)"),
+		*CurrentConversationId, ConvoMessages.Num(), CachedChatTranscript.Len()));
 }
 
 // ============================================================================
@@ -1447,6 +2236,7 @@ void FGitHubCopilotUEBridgeService::CheckForTimeouts()
 	for (const FString& ReqId : TimedOut)
 	{
 		PendingRequestTimestamps.Remove(ReqId);
+		NoResponseRetryCounts.Remove(ReqId);
 		FCopilotResponse TimeoutResp;
 		TimeoutResp.RequestId = ReqId;
 		TimeoutResp.ResultStatus = ECopilotResultStatus::Timeout;

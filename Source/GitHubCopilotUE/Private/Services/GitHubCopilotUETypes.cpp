@@ -107,6 +107,14 @@ TSharedPtr<FJsonObject> FCopilotFileTarget::ToJson() const
 	return Json;
 }
 
+TSharedPtr<FJsonObject> FCopilotAttachment::ToJson() const
+{
+	TSharedPtr<FJsonObject> Json = MakeShareable(new FJsonObject());
+	Json->SetStringField(TEXT("filePath"), FilePath);
+	Json->SetStringField(TEXT("mimeType"), MimeType);
+	return Json;
+}
+
 // ============================================================================
 // FCopilotRequest
 // ============================================================================
@@ -128,6 +136,13 @@ TSharedPtr<FJsonObject> FCopilotRequest::ToJson() const
 		TargetsArray.Add(MakeShareable(new FJsonValueObject(Target.ToJson())));
 	}
 	Json->SetArrayField(TEXT("fileTargets"), TargetsArray);
+
+	TArray<TSharedPtr<FJsonValue>> AttachmentsArray;
+	for (const FCopilotAttachment& Attachment : Attachments)
+	{
+		AttachmentsArray.Add(MakeShareable(new FJsonValueObject(Attachment.ToJson())));
+	}
+	Json->SetArrayField(TEXT("attachments"), AttachmentsArray);
 
 	// Command arguments
 	TSharedPtr<FJsonObject> ArgsJson = MakeShareable(new FJsonObject());

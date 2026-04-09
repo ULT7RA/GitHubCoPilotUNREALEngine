@@ -18,8 +18,13 @@
 #include "Widgets/Images/SThrobber.h"
 #include "Widgets/Text/STextBlock.h"
 #include "HAL/PlatformApplicationMisc.h"
+#include "HAL/FileManager.h"
 #include "Widgets/Input/SComboBox.h"
+#include "DesktopPlatformModule.h"
+#include "IDesktopPlatform.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Misc/DateTime.h"
+#include "Misc/Paths.h"
 #include "Async/Async.h"
 #include "InputCoreTypes.h"
 
@@ -31,6 +36,24 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 	ContextService = InArgs._ContextService;
 	BridgeService = InArgs._BridgeService;
 	PatchService = InArgs._PatchService;
+
+	// Retrieve or create a persistent conversation ID from the BridgeService
+	// This survives panel recreation (e.g. tab close/reopen, layout restore)
+	if (BridgeService.IsValid())
+	{
+		ConversationId = BridgeService->GetOrCreateConversationId();
+
+		// Restore chat transcript from previous session
+		FString SavedTranscript = BridgeService->GetChatTranscript();
+		if (!SavedTranscript.IsEmpty())
+		{
+			ChatTranscriptBuffer = SavedTranscript;
+		}
+	}
+	else
+	{
+		ConversationId = FGuid::NewGuid().ToString(EGuidFormats::Short);
+	}
 
 	// Wire up delegates — store handles for safe cleanup in destructor
 	if (CommandRouter.IsValid())
@@ -44,6 +67,7 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 		ConnectionStatusDelegateHandle = BridgeService->OnConnectionStatusChanged.AddRaw(this, &SGitHubCopilotUEPanel::OnConnectionStatusChanged);
 		BridgeLogDelegateHandle = BridgeService->OnLogMessage.AddRaw(this, &SGitHubCopilotUEPanel::OnLogMessageReceived);
 		ActiveModelChangedDelegateHandle = BridgeService->OnActiveModelChanged.AddRaw(this, &SGitHubCopilotUEPanel::OnActiveModelChanged);
+		ToolActivityDelegateHandle = BridgeService->OnToolActivity.AddRaw(this, &SGitHubCopilotUEPanel::OnToolActivity);
 	}
 
 	ChildSlot
@@ -69,7 +93,7 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 		.FillHeight(1.0f)
 		.Padding(4)
 		[
-			SNew(SScrollBox)
+			SAssignNew(ChatScrollBox, SScrollBox)
 
 			// Project Context Box
 			+ SScrollBox::Slot()
@@ -136,6 +160,12 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 		]
 	];
 
+	// Restore chat transcript to UI if we loaded one from disk
+	if (!ChatTranscriptBuffer.IsEmpty())
+	{
+		SetResponseText(ChatTranscriptBuffer);
+	}
+
 	// Wire auth delegates
 	if (BridgeService.IsValid())
 	{
@@ -147,6 +177,7 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 	// Refresh context on load
 	OnRefreshContext();
 	UpdateThinkingIndicator();
+	RefreshUploadSummary();
 	AppendToLog(TEXT("GitHub Copilot UE panel initialized"));
 
 	// Update auth status
@@ -193,6 +224,7 @@ SGitHubCopilotUEPanel::~SGitHubCopilotUEPanel()
 		BridgeService->OnAuthComplete.Remove(AuthCompleteDelegateHandle);
 		BridgeService->OnModelsLoaded.Remove(ModelsLoadedDelegateHandle);
 		BridgeService->OnActiveModelChanged.Remove(ActiveModelChangedDelegateHandle);
+		BridgeService->OnToolActivity.Remove(ToolActivityDelegateHandle);
 	}
 }
 
@@ -372,9 +404,6 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildVRContextBox()
 
 TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildPromptInput()
 {
-	const UGitHubCopilotUESettings* Settings = UGitHubCopilotUESettings::Get();
-	const FString SavedUserHandle = Settings ? Settings->UserHandle : TEXT("");
-
 	return SNew(SVerticalBox)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
@@ -383,31 +412,6 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildPromptInput()
 			SNew(STextBlock)
 			.Text(LOCTEXT("PromptLabel", "Chat Setup:"))
 			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 10))
-		]
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(0, 2)
-		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			.Padding(0, 0, 6, 0)
-			[
-				SNew(STextBlock)
-				.Text(LOCTEXT("HandleLabel", "Handle:"))
-			]
-			+ SHorizontalBox::Slot()
-			.FillWidth(1.0f)
-			[
-				SAssignNew(UserHandleTextBox, SEditableTextBox)
-				.Text(FText::FromString(SavedUserHandle))
-				.HintText(LOCTEXT("HandleHint", "Enter your name/handle (saved for future prompts)"))
-				.OnTextCommitted_Lambda([this](const FText& NewText, ETextCommit::Type CommitType)
-				{
-					OnUserHandleCommitted(NewText, CommitType);
-				})
-			]
 		]
 		+ SVerticalBox::Slot()
 		.AutoHeight()
@@ -563,6 +567,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 					SAssignNew(ResponseTextBox, SMultiLineEditableTextBox)
 					.IsReadOnly(true)
 					.AutoWrapText(true)
+					.Font(FSlateFontInfo(TEXT("C:\\Windows\\Fonts\\consolab.ttf"), 12))
 					.HintText(LOCTEXT("ResponseHint", "Running dialogue appears here (UserHandle + returned Model label)..."))
 				]
 			]
@@ -627,6 +632,33 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 					.Text(LOCTEXT("ClearBtn", "Clear"))
 					.OnClicked_Lambda([this]() -> FReply { OnClearAll(); return FReply::Handled(); })
 				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(4, 0, 0, 0)
+				.VAlign(VAlign_Bottom)
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("UploadBtn", "Upload"))
+					.OnClicked_Lambda([this]() -> FReply { OnUploadFiles(); return FReply::Handled(); })
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(4, 0, 0, 0)
+				.VAlign(VAlign_Bottom)
+				[
+					SNew(SButton)
+					.Text(LOCTEXT("ClearUploadsBtn", "Clear Uploads"))
+					.OnClicked_Lambda([this]() -> FReply { OnClearUploads(); return FReply::Handled(); })
+				]
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 4.0f, 0.0f, 0.0f)
+			[
+				SAssignNew(UploadSummaryText, STextBlock)
+				.Text(LOCTEXT("UploadSummaryNone", "Attachments: none"))
+				.AutoWrapText(true)
+				.ColorAndOpacity(FSlateColor(FLinearColor(0.7f, 0.7f, 0.7f)))
 			]
 		];
 }
@@ -724,24 +756,30 @@ void SGitHubCopilotUEPanel::OnSendPrompt()
 	}
 
 	const FString UserHandle = GetUserHandle();
-	if (UserHandle.IsEmpty())
+	FString UserTurnMessage = Prompt;
+	if (PendingUploadPaths.Num() > 0)
 	{
-		AppendToLog(TEXT("Please enter your name/handle before sending prompts."));
-		AppendChatTurn(TEXT("System"), TEXT("Set your handle first, then send your prompt."));
-		return;
+		UserTurnMessage += FString::Printf(TEXT("\n[%s]"), *BuildUploadSummaryLabel());
 	}
-	SaveUserHandle(UserHandle);
-	AppendChatTurn(UserHandle, Prompt);
+	AppendChatTurn(UserHandle.IsEmpty() ? TEXT("You") : UserHandle, UserTurnMessage);
 
 	// Default to AnalyzeSelection for free-form prompts sent to backend
 	FCopilotRequest Request = BuildRequest(ECopilotCommandType::AnalyzeSelection);
 	Request.UserPrompt = Prompt;
+	AppendPendingUploadsToRequest(Request);
 
 	PendingCommandTypes.Add(Request.RequestId, Request.CommandType);
 	PendingPromptByRequestId.Add(Request.RequestId, Prompt);
 	MarkBackendRequestPending(Request.RequestId);
-	AppendToLog(FString::Printf(TEXT("Sending prompt (ID: %s)..."), *Request.RequestId));
+
+	// Log conversation state for diagnostics
+	const int32 MsgCount = BridgeService.IsValid() ? BridgeService->GetConversationMessageCount(ConversationId) : -1;
+	AppendToLog(FString::Printf(TEXT("Sending prompt (ID: %s, ConvoID: %s, history: %d msgs)..."),
+		*Request.RequestId, *ConversationId, MsgCount));
+
 	CommandRouter->RouteCommand(Request);
+	PendingUploadPaths.Empty();
+	RefreshUploadSummary();
 
 	// Clear the prompt
 	PromptTextBox->SetText(FText::GetEmpty());
@@ -761,6 +799,7 @@ void SGitHubCopilotUEPanel::OnActionButton(ECopilotCommandType CommandType)
 	const FString PromptText = PromptTextBox.IsValid() ? PromptTextBox->GetText().ToString().TrimStartAndEnd() : TEXT("");
 	Request.UserPrompt = PromptText;
 	PopulateRequestTargetsFromUI(Request, CommandType, PromptText);
+	AppendPendingUploadsToRequest(Request);
 
 	switch (CommandType)
 	{
@@ -803,16 +842,17 @@ void SGitHubCopilotUEPanel::OnActionButton(ECopilotCommandType CommandType)
 	if (CommandRouter->RequiresBackend(CommandType) && !Request.UserPrompt.IsEmpty())
 	{
 		const FString UserHandle = GetUserHandle();
-		if (UserHandle.IsEmpty())
+		FString UserTurnMessage = Request.UserPrompt;
+		if (Request.Attachments.Num() > 0)
 		{
-			AppendToLog(TEXT("Please enter your name/handle before sending prompts."));
-			AppendChatTurn(TEXT("System"), TEXT("Set your handle first, then send your prompt."));
-			return;
+			UserTurnMessage += FString::Printf(TEXT("\n[%s]"), *BuildUploadSummaryLabel());
 		}
-
-		SaveUserHandle(UserHandle);
-		AppendChatTurn(UserHandle, Request.UserPrompt);
+		AppendChatTurn(UserHandle.IsEmpty() ? TEXT("You") : UserHandle, UserTurnMessage);
 		PendingPromptByRequestId.Add(Request.RequestId, Request.UserPrompt);
+	}
+	else if (CommandRouter->RequiresBackend(CommandType) && Request.Attachments.Num() > 0)
+	{
+		AppendChatTurn(TEXT("System"), FString::Printf(TEXT("%s"), *BuildUploadSummaryLabel()));
 	}
 
 	FString CommandName = TEXT("Action");
@@ -829,6 +869,83 @@ void SGitHubCopilotUEPanel::OnActionButton(ECopilotCommandType CommandType)
 	}
 	AppendToLog(FString::Printf(TEXT("Executing command %d (ID: %s)..."), (int32)CommandType, *Request.RequestId));
 	CommandRouter->RouteCommand(Request);
+	if (CommandRouter->RequiresBackend(CommandType))
+	{
+		PendingUploadPaths.Empty();
+		RefreshUploadSummary();
+	}
+}
+
+void SGitHubCopilotUEPanel::OnUploadFiles()
+{
+	IDesktopPlatform* DesktopPlatform = FDesktopPlatformModule::Get();
+	if (!DesktopPlatform)
+	{
+		AppendToLog(TEXT("File upload is unavailable: Desktop platform module is not loaded."));
+		return;
+	}
+
+	const void* ParentWindowHandle = nullptr;
+	if (FSlateApplication::IsInitialized())
+	{
+		ParentWindowHandle = FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr);
+	}
+
+	const FString FileTypes =
+		TEXT("Supported Files|*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif;*.txt;*.md;*.json;*.ini;*.cpp;*.h;*.cs;*.log|")
+		TEXT("Image Files|*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif|")
+		TEXT("Text + Code Files|*.txt;*.md;*.json;*.ini;*.cpp;*.h;*.cs;*.log|")
+		TEXT("All Files|*.*");
+
+	TArray<FString> PickedFiles;
+	const bool bPickedFiles = DesktopPlatform->OpenFileDialog(
+		ParentWindowHandle,
+		TEXT("Attach files to Copilot request"),
+		FPaths::ProjectDir(),
+		TEXT(""),
+		FileTypes,
+		EFileDialogFlags::Multiple,
+		PickedFiles);
+
+	if (!bPickedFiles || PickedFiles.Num() == 0)
+	{
+		return;
+	}
+
+	int32 AddedCount = 0;
+	for (const FString& Path : PickedFiles)
+	{
+		if (!FPaths::FileExists(Path))
+		{
+			AppendToLog(FString::Printf(TEXT("Skipped missing file: %s"), *Path));
+			continue;
+		}
+
+		const FString NormalizedPath = FPaths::ConvertRelativePathToFull(Path);
+		if (!PendingUploadPaths.Contains(NormalizedPath))
+		{
+			PendingUploadPaths.Add(NormalizedPath);
+			++AddedCount;
+		}
+	}
+
+	RefreshUploadSummary();
+	if (AddedCount > 0)
+	{
+		AppendToLog(FString::Printf(TEXT("Attached %d file(s)."), AddedCount));
+	}
+}
+
+void SGitHubCopilotUEPanel::OnClearUploads()
+{
+	if (PendingUploadPaths.Num() == 0)
+	{
+		return;
+	}
+
+	PendingUploadPaths.Empty();
+	RefreshUploadSummary();
+	AppendToLog(TEXT("Cleared attached files."));
 }
 
 void SGitHubCopilotUEPanel::OnCopyResponse()
@@ -856,7 +973,23 @@ void SGitHubCopilotUEPanel::OnClearAll()
 	CurrentDiffPreview = FCopilotDiffPreview();
 	ChatTranscriptBuffer.Empty();
 	PendingPromptByRequestId.Empty();
-	AppendToLog(TEXT("Cleared all fields"));
+	PendingUploadPaths.Empty();
+	RefreshUploadSummary();
+
+	// Clear the conversation in the bridge service and start a new one
+	if (BridgeService.IsValid())
+	{
+		ConversationId = BridgeService->ResetConversationId();
+		BridgeService->SetChatTranscript(TEXT(""));
+		// Delete the conversation cache file
+		IFileManager::Get().Delete(*BridgeService->GetConversationCachePath());
+	}
+	else
+	{
+		ConversationId = FGuid::NewGuid().ToString(EGuidFormats::Short);
+	}
+
+	AppendToLog(TEXT("Cleared all fields — new conversation started"));
 }
 
 void SGitHubCopilotUEPanel::OnApplyPatch()
@@ -1090,27 +1223,17 @@ void SGitHubCopilotUEPanel::OnActiveModelChanged(const FString& ModelId)
 	});
 }
 
+void SGitHubCopilotUEPanel::OnToolActivity(const FString& ActivityMessage)
+{
+	AsyncTask(ENamedThreads::GameThread, [this, ActivityMessage]()
+	{
+		AppendChatTurn(TEXT("[tool]"), ActivityMessage);
+	});
+}
+
 TSharedRef<SWidget> SGitHubCopilotUEPanel::MakeModelComboRow(TSharedPtr<FString> Item)
 {
 	return SNew(STextBlock).Text(FText::FromString(Item.IsValid() ? *Item : TEXT("(none)")));
-}
-
-void SGitHubCopilotUEPanel::OnUserHandleCommitted(const FText& NewText, ETextCommit::Type CommitType)
-{
-	SaveUserHandle(NewText.ToString());
-
-	if (CommitType != ETextCommit::Default)
-	{
-		const FString TrimmedHandle = GetUserHandle();
-		if (TrimmedHandle.IsEmpty())
-		{
-			AppendToLog(TEXT("User handle cleared. Enter a handle before sending prompts."));
-		}
-		else
-		{
-			AppendToLog(FString::Printf(TEXT("Using handle: %s"), *TrimmedHandle));
-		}
-	}
 }
 
 void SGitHubCopilotUEPanel::OnRefreshContext()
@@ -1168,11 +1291,14 @@ void SGitHubCopilotUEPanel::OnResponseReceived(const FCopilotResponse& Response)
 		FString Speaker = TEXT("System");
 		if (const FString* ReturnedModel = Response.ProviderMetadata.Find(TEXT("model")))
 		{
-			Speaker = FString::Printf(TEXT("Model (%s)"), **ReturnedModel);
+			const FString TrimmedModel = ReturnedModel->TrimStartAndEnd();
+			Speaker = TrimmedModel.IsEmpty()
+				? TEXT("Model (API: missing)")
+				: FString::Printf(TEXT("Model (%s)"), *TrimmedModel);
 		}
 		else if (CommandRouter.IsValid() && CommandRouter->RequiresBackend(ResolvedCommandType))
 		{
-			Speaker = TEXT("Model");
+			Speaker = TEXT("Model (API: missing)");
 		}
 
 		FString DisplayText;
@@ -1240,10 +1366,63 @@ void SGitHubCopilotUEPanel::OnLogMessageReceived(const FString& Message)
 // Helpers
 // ============================================================================
 
+void SGitHubCopilotUEPanel::AppendPendingUploadsToRequest(FCopilotRequest& Request) const
+{
+	for (const FString& PendingPath : PendingUploadPaths)
+	{
+		if (PendingPath.IsEmpty())
+		{
+			continue;
+		}
+
+		FCopilotAttachment Attachment;
+		Attachment.FilePath = PendingPath;
+		Request.Attachments.Add(Attachment);
+	}
+}
+
+FString SGitHubCopilotUEPanel::BuildUploadSummaryLabel() const
+{
+	if (PendingUploadPaths.Num() == 0)
+	{
+		return TEXT("Attachments: none");
+	}
+
+	const int32 MaxVisibleNames = 3;
+	const int32 VisibleCount = FMath::Min(MaxVisibleNames, PendingUploadPaths.Num());
+	TArray<FString> FileNames;
+	FileNames.Reserve(VisibleCount);
+	for (int32 Index = 0; Index < VisibleCount; ++Index)
+	{
+		FileNames.Add(FPaths::GetCleanFilename(PendingUploadPaths[Index]));
+	}
+
+	FString Suffix;
+	if (PendingUploadPaths.Num() > VisibleCount)
+	{
+		Suffix = FString::Printf(TEXT(" +%d more"), PendingUploadPaths.Num() - VisibleCount);
+	}
+
+	return FString::Printf(
+		TEXT("Attachments: %d (%s%s)"),
+		PendingUploadPaths.Num(),
+		*FString::Join(FileNames, TEXT(", ")),
+		*Suffix);
+}
+
+void SGitHubCopilotUEPanel::RefreshUploadSummary()
+{
+	if (UploadSummaryText.IsValid())
+	{
+		UploadSummaryText->SetText(FText::FromString(BuildUploadSummaryLabel()));
+	}
+}
+
 FCopilotRequest SGitHubCopilotUEPanel::BuildRequest(ECopilotCommandType CommandType) const
 {
 	FCopilotRequest Request;
 	Request.RequestId = FGitHubCopilotUECommandRouter::GenerateRequestId();
+	Request.ConversationId = ConversationId; // Persistent across messages
 	Request.CommandType = CommandType;
 	Request.ExecutionMode = ECopilotExecutionMode::PreviewOnly;
 	Request.Timestamp = FDateTime::Now().ToString();
@@ -1386,6 +1565,13 @@ void SGitHubCopilotUEPanel::AppendChatTurn(const FString& Speaker, const FString
 	}
 
 	SetResponseText(ChatTranscriptBuffer);
+
+	// Persist transcript + conversation to disk after every turn
+	if (BridgeService.IsValid())
+	{
+		BridgeService->SetChatTranscript(ChatTranscriptBuffer);
+		BridgeService->SaveConversationCache();
+	}
 }
 
 void SGitHubCopilotUEPanel::MarkBackendRequestPending(const FString& RequestId)
@@ -1427,37 +1613,15 @@ void SGitHubCopilotUEPanel::UpdateThinkingIndicator()
 
 FString SGitHubCopilotUEPanel::GetUserHandle() const
 {
-	FString UserHandle = UserHandleTextBox.IsValid()
-		? UserHandleTextBox->GetText().ToString().TrimStartAndEnd()
-		: TEXT("");
-
-	if (UserHandle.IsEmpty())
+	if (BridgeService.IsValid())
 	{
-		const UGitHubCopilotUESettings* Settings = UGitHubCopilotUESettings::Get();
-		if (Settings)
+		FString GitHubUser = BridgeService->GetUsername();
+		if (!GitHubUser.IsEmpty())
 		{
-			UserHandle = Settings->UserHandle.TrimStartAndEnd();
+			return GitHubUser;
 		}
 	}
-
-	return UserHandle;
-}
-
-void SGitHubCopilotUEPanel::SaveUserHandle(const FString& UserHandle)
-{
-	const FString TrimmedHandle = UserHandle.TrimStartAndEnd();
-
-	if (UserHandleTextBox.IsValid() && UserHandleTextBox->GetText().ToString() != TrimmedHandle)
-	{
-		UserHandleTextBox->SetText(FText::FromString(TrimmedHandle));
-	}
-
-	UGitHubCopilotUESettings* MutableSettings = GetMutableDefault<UGitHubCopilotUESettings>();
-	if (MutableSettings && MutableSettings->UserHandle != TrimmedHandle)
-	{
-		MutableSettings->UserHandle = TrimmedHandle;
-		MutableSettings->SaveConfig();
-	}
+	return TEXT("You");
 }
 
 void SGitHubCopilotUEPanel::SetResponseText(const FString& Text)
@@ -1465,6 +1629,11 @@ void SGitHubCopilotUEPanel::SetResponseText(const FString& Text)
 	if (ResponseTextBox.IsValid())
 	{
 		ResponseTextBox->SetText(FText::FromString(Text));
+	}
+	// Auto-scroll to bottom so latest messages are visible
+	if (ChatScrollBox.IsValid())
+	{
+		ChatScrollBox->ScrollToEnd();
 	}
 }
 

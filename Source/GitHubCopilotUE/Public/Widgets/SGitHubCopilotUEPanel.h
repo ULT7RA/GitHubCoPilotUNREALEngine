@@ -50,6 +50,8 @@ private:
 	// --- Action handlers ---
 	void OnSendPrompt();
 	void OnActionButton(ECopilotCommandType CommandType);
+	void OnUploadFiles();
+	void OnClearUploads();
 	void OnCopyResponse();
 	void OnClearAll();
 	void OnApplyPatch();
@@ -60,13 +62,13 @@ private:
 	void OnRefreshModels();
 	void OnModelSelected(TSharedPtr<FString> NewModel, ESelectInfo::Type SelectInfo);
 	TSharedRef<SWidget> MakeModelComboRow(TSharedPtr<FString> Item);
-	void OnUserHandleCommitted(const FText& NewText, ETextCommit::Type CommitType);
 
 	// --- Event handlers ---
 	void OnDeviceCodeReceived(const FString& UserCode, const FString& VerificationURI);
 	void OnAuthComplete();
 	void OnModelsLoaded(const TArray<FCopilotModel>& Models);
 	void OnActiveModelChanged(const FString& ModelId);
+	void OnToolActivity(const FString& ActivityMessage);
 	void OnResponseReceived(const FCopilotResponse& Response);
 	void OnConnectionStatusChanged(ECopilotConnectionStatus NewStatus);
 	void OnLogMessageReceived(const FString& Message);
@@ -81,8 +83,10 @@ private:
 	void MarkBackendRequestPending(const FString& RequestId);
 	void MarkBackendRequestCompleted(const FString& RequestId);
 	void UpdateThinkingIndicator();
+	void AppendPendingUploadsToRequest(FCopilotRequest& Request) const;
+	FString BuildUploadSummaryLabel() const;
+	void RefreshUploadSummary();
 	FString GetUserHandle() const;
-	void SaveUserHandle(const FString& UserHandle);
 	void SetResponseText(const FString& Text);
 	void SetDiffText(const FString& Text);
 
@@ -94,11 +98,12 @@ private:
 
 	// --- UI State ---
 	TSharedPtr<SMultiLineEditableTextBox> PromptTextBox;
-	TSharedPtr<SEditableTextBox> UserHandleTextBox;
 	TSharedPtr<SMultiLineEditableTextBox> ResponseTextBox;
 	TSharedPtr<SMultiLineEditableTextBox> DiffPreviewTextBox;
 	TSharedPtr<SMultiLineEditableTextBox> LogTextBox;
+	TSharedPtr<STextBlock> UploadSummaryText;
 	TSharedPtr<SHorizontalBox> ThinkingIndicatorRow;
+	TSharedPtr<SScrollBox> ChatScrollBox;
 	TSharedPtr<SEditableTextBox> TargetPathTextBox;
 	TSharedPtr<SEditableTextBox> TargetLineTextBox;
 	TSharedPtr<STextBlock> StatusText;
@@ -112,7 +117,9 @@ private:
 	TMap<FString, ECopilotCommandType> PendingCommandTypes;
 	TMap<FString, FString> PendingPromptByRequestId;
 	TSet<FString> PendingBackendRequestIds;
+	TArray<FString> PendingUploadPaths;
 	bool bThinkingVisible = false;
+	FString ConversationId; // Persistent across messages in the same chat session
 
 	// Auth & model state
 	TSharedPtr<STextBlock> AuthStatusText;
@@ -130,4 +137,5 @@ private:
 	FDelegateHandle AuthCompleteDelegateHandle;
 	FDelegateHandle ModelsLoadedDelegateHandle;
 	FDelegateHandle ActiveModelChangedDelegateHandle;
+	FDelegateHandle ToolActivityDelegateHandle;
 };

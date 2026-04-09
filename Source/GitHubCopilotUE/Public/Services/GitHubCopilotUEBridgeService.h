@@ -62,11 +62,23 @@ struct FCopilotModel
 	/** Get the correct endpoint path for this model */
 	FString GetEndpointPath() const
 	{
-		if (!bSupportsChatCompletions && bSupportsResponses)
+		// ALWAYS prefer /chat/completions when the model supports it,
+		// since our request body is built for that format.
+		if (bSupportsChatCompletions)
+		{
+			return TEXT("/chat/completions");
+		}
+		if (bSupportsResponses)
 		{
 			return TEXT("/responses");
 		}
 		return TEXT("/chat/completions");
+	}
+
+	/** True when the model requires /responses endpoint format */
+	bool RequiresResponsesFormat() const
+	{
+		return !bSupportsChatCompletions && bSupportsResponses;
 	}
 };
 
@@ -84,6 +96,7 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FOnCopilotDeviceCode, const FString& /*User
 DECLARE_MULTICAST_DELEGATE(FOnCopilotAuthComplete);
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnCopilotModelsLoaded, const TArray<FCopilotModel>& /*Models*/);
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnCopilotActiveModelChanged, const FString& /*ModelId*/);
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnCopilotToolActivity, const FString& /*ActivityMessage*/);
 
 /**
  * Bridge service implementing real GitHub Copilot API integration.
@@ -139,6 +152,37 @@ public:
 	/** Set the tool executor for agentic tool-calling */
 	void SetToolExecutor(TSharedPtr<FGitHubCopilotUEToolExecutor> InToolExecutor) { ToolExecutor = InToolExecutor; }
 
+	/** Clear a persistent conversation (e.g. when user clicks "Clear Chat") */
+	void ClearConversation(const FString& ConversationId);
+
+	/**
+	 * Get or create a persistent conversation ID.
+	 * If one already exists from a previous panel session, returns it.
+	 * Otherwise creates a new one. This ensures conversation survives panel recreation.
+	 */
+	FString GetOrCreateConversationId();
+
+	/** Reset the current conversation ID (used by Clear Chat) and return the new one */
+	FString ResetConversationId();
+
+	/** Get the current conversation's message count (for diagnostics) */
+	int32 GetConversationMessageCount(const FString& ConversationId) const;
+
+	/** Save conversation history to disk so it survives editor restarts */
+	void SaveConversationCache();
+
+	/** Load conversation history from disk */
+	void LoadConversationCache();
+
+	/** Save the UI chat transcript alongside conversation data */
+	void SetChatTranscript(const FString& Transcript);
+
+	/** Get the saved UI chat transcript */
+	FString GetChatTranscript() const;
+
+	/** Get the path to the conversation cache file */
+	FString GetConversationCachePath() const;
+
 	/** Save auth + model selection to disk */
 	void SaveTokenCache();
 
@@ -161,6 +205,7 @@ public:
 	FOnCopilotAuthComplete OnAuthComplete;
 	FOnCopilotModelsLoaded OnModelsLoaded;
 	FOnCopilotActiveModelChanged OnActiveModelChanged;
+	FOnCopilotToolActivity OnToolActivity;
 
 private:
 	// === Auth flow internals ===
@@ -173,6 +218,8 @@ private:
 	void OnGitHubUserResponse(FHttpRequestPtr HttpReq, FHttpResponsePtr HttpResp, bool bSuccess);
 	bool IsCopilotTokenExpired() const;
 	void RefreshCopilotTokenIfNeeded();
+	void FlushQueuedRequests();
+	void FlushQueuedRequestsAsFailure(const FString& ErrorMessage);
 
 	// === Endpoint Discovery ===
 	void DiscoverAPIEndpoint();
@@ -186,7 +233,7 @@ private:
 
 	// === Chat ===
 	void SendChatCompletion(const FCopilotRequest& Request, bool bAllowToolCalls = true);
-	void OnChatCompletionResponse(FHttpRequestPtr HttpReq, FHttpResponsePtr HttpResp, bool bSuccess, FString RequestId);
+	void OnChatCompletionResponse(FHttpRequestPtr HttpReq, FHttpResponsePtr HttpResp, bool bSuccess, FString RequestId, FString ConversationId);
 	FString BuildSystemPrompt(const FCopilotRequest& Request) const;
 	FString CommandTypeToString(ECopilotCommandType Type) const;
 
@@ -226,12 +273,23 @@ private:
 
 	// Request tracking
 	TMap<FString, double> PendingRequestTimestamps;
+	TMap<FString, int32> NoResponseRetryCounts;
+
+	// Queued requests waiting for token refresh
+	TArray<TPair<FCopilotRequest, bool>> QueuedRequestsAwaitingToken;
+	bool bIsRefreshingToken = false;
 
 	// Agentic tool-calling state
 	TSharedPtr<FGitHubCopilotUEToolExecutor> ToolExecutor;
-	TMap<FString, TArray<TSharedPtr<FJsonValue>>> ActiveConversations; // RequestId -> messages array
+	TMap<FString, TArray<TSharedPtr<FJsonValue>>> ActiveConversations; // ConversationId -> messages array (persistent across turns)
 	TMap<FString, int32> ToolCallIterations; // RequestId -> iteration count (safety limit)
 	TSet<FString> ForcedFinalResponseRequestIds; // Requests that already switched to no-tool finalization
+
+	// Persistent conversation ID — survives panel recreation
+	FString CurrentConversationId;
+
+	// Cached UI transcript (saved/loaded alongside conversation)
+	FString CachedChatTranscript;
 
 	// Token persistence path
 	FString GetTokenCachePath() const;

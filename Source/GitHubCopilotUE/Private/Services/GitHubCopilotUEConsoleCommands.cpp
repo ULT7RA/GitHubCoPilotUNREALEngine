@@ -251,11 +251,15 @@ void FGitHubCopilotUEConsoleCommands::OnAIResponseReceived(const FCopilotRespons
 {
 	if (Response.bSuccess)
 	{
-		// Get model name from response metadata
-		FString ModelName = TEXT("copilot");
+		// Always report API-returned model only; never guess.
+		FString ModelName = TEXT("API:model-missing");
 		if (const FString* Model = Response.ProviderMetadata.Find(TEXT("model")))
 		{
-			ModelName = *Model;
+			const FString TrimmedModel = Model->TrimStartAndEnd();
+			if (!TrimmedModel.IsEmpty())
+			{
+				ModelName = TrimmedModel;
+			}
 		}
 
 		Print(TEXT(""));
@@ -306,6 +310,13 @@ void FGitHubCopilotUEConsoleCommands::HandleAsk(const TArray<FString>& Args)
 	Request.CommandType = ECopilotCommandType::AnalyzeSelection;
 	Request.UserPrompt = Prompt;
 	Request.Timestamp = FDateTime::Now().ToString();
+
+	// Use persistent conversation ID for multi-turn REPL chat
+	if (ConsoleConversationId.IsEmpty())
+	{
+		ConsoleConversationId = FGuid::NewGuid().ToString(EGuidFormats::Short);
+	}
+	Request.ConversationId = ConsoleConversationId;
 
 	// Attach project context
 	if (ContextService.IsValid())

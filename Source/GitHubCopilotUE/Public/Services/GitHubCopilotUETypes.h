@@ -120,6 +120,17 @@ struct FCopilotFileTarget
 };
 
 USTRUCT(BlueprintType)
+struct FCopilotAttachment
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString FilePath;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString MimeType;
+
+	TSharedPtr<FJsonObject> ToJson() const;
+};
+
+USTRUCT(BlueprintType)
 struct FCopilotDiffPreview
 {
 	GENERATED_BODY()
@@ -137,11 +148,13 @@ struct FCopilotRequest
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString RequestId;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString ConversationId; // Persistent per chat session — same across messages
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") ECopilotCommandType CommandType = ECopilotCommandType::AnalyzeProject;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") ECopilotExecutionMode ExecutionMode = ECopilotExecutionMode::SuggestOnly;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString UserPrompt;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FCopilotProjectContext ProjectContext;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FCopilotFileTarget> FileTargets;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") TArray<FCopilotAttachment> Attachments;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Copilot") FString Timestamp;
 	// Non-UPROPERTY members for flexible command arguments
 	TMap<FString, FString> CommandArguments;

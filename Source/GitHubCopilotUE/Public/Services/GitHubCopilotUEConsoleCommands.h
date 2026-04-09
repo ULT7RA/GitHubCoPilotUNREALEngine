@@ -117,6 +117,9 @@ private:
 	TSharedPtr<FGitHubCopilotUEPatchService> PatchService;
 	TSharedPtr<FGitHubCopilotUESlashCommands> SlashCommands;
 
+	// Persistent conversation ID for REPL-style multi-turn chat
+	FString ConsoleConversationId;
+
 	// Registered command objects (for cleanup)
 	TArray<IConsoleObject*> RegisteredCommands;
 };

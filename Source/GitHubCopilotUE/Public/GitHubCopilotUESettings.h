@@ -31,8 +31,8 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Connection", meta = (DisplayName = "API Key"))
 	FString ApiKey;
 
-	/** Model name to request from the backend */
-	UPROPERTY(config, EditAnywhere, Category = "Connection", meta = (DisplayName = "Model Name"))
+	/** Legacy field kept for compatibility; Copilot model routing uses the active model picker and /model command. */
+	UPROPERTY(config, EditAnywhere, Category = "Connection", meta = (DisplayName = "Legacy Model Name (unused for Copilot API)"))
 	FString ModelName;
 
 	/** Display handle used in the panel chat transcript */
@@ -40,8 +40,12 @@ public:
 	FString UserHandle;
 
 	/** Request timeout in seconds */
-	UPROPERTY(config, EditAnywhere, Category = "Connection", meta = (DisplayName = "Timeout (Seconds)", ClampMin = "5", ClampMax = "300"))
+	UPROPERTY(config, EditAnywhere, Category = "Connection", meta = (DisplayName = "Timeout (Seconds)", ClampMin = "30", ClampMax = "3600"))
 	int32 TimeoutSeconds;
+
+	/** Maximum output tokens per API response. Increase for longer model responses. */
+	UPROPERTY(config, EditAnywhere, Category = "Connection", meta = (DisplayName = "Max Output Tokens", ClampMin = "1024", ClampMax = "128000"))
+	int32 MaxOutputTokens;
 
 	/** Max tool-call loop iterations per request (0 = unlimited) */
 	UPROPERTY(config, EditAnywhere, Category = "Execution", meta = (DisplayName = "Max Tool-Call Iterations (0 = Unlimited)", ClampMin = "0", ClampMax = "5000"))
@@ -66,6 +70,14 @@ public:
 	/** Allowed write root directories (relative to project). Files outside these roots will be rejected. */
 	UPROPERTY(config, EditAnywhere, Category = "Safety", meta = (DisplayName = "Allowed Write Roots"))
 	TArray<FString> AllowedWriteRoots;
+
+	/** Additional external folder paths the AI is allowed to read and write. Absolute paths only (e.g. C:/MyCode/SharedLib). */
+	UPROPERTY(config, EditAnywhere, Category = "Safety", meta = (DisplayName = "Additional Allowed Paths"))
+	TArray<FString> AdditionalAllowedPaths;
+
+	/** When enabled, the AI can access ANY path on the system without restriction. Use with caution. */
+	UPROPERTY(config, EditAnywhere, Category = "Safety", meta = (DisplayName = "Allow All File Access (Unrestricted)"))
+	bool bAllowAllFileAccess;
 
 	/** Enable compile commands from the plugin */
 	UPROPERTY(config, EditAnywhere, Category = "Compile", meta = (DisplayName = "Enable Compile Commands"))

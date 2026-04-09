@@ -52,6 +52,12 @@ private:
 	FString Tool_RunAutomationTests(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_GetFileInfo(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_DeleteFile(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_SpawnActor(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_CreateMaterialAsset(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_CreateDataTable(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_CreateNiagaraSystem(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_WebSearch(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_CaptureViewport(const TSharedPtr<FJsonObject>& Args);
 
 	/** Resolve a path — if relative, treat it as relative to project root */
 	FString ResolvePath(const FString& InputPath) const;

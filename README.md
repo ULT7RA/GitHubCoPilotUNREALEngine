@@ -31,6 +31,7 @@ This is **not** a mock chat panel. The plugin features a full **agentic tool-cal
 - Engine-wide deployment flow validated for UE **5.6** + **5.7** (`Engine/Plugins/Marketplace/GitHubCopilotUE`)
 - Shared auth/session behavior across dockable panel + console/REPL
 - Unified chat UI with prompt + transcript in one area, plus **Enter to send** (`Shift+Enter` newline)
+- Added **Upload** support in chat (screenshots/images + text/code files) with attachment summary + clear controls
 - Visible in-chat working state via **`Copilot is thinking...`** animation
 - Expanded tool surface (`view`, `glob`, `rg`, file ops, compile/live coding/tests, Blueprint asset creation)
 - Tool-loop guard is now configurable (`Max Tool-Call Iterations`, default `0` = unlimited)
@@ -49,6 +50,7 @@ This is **not** a mock chat panel. The plugin features a full **agentic tool-cal
 - Real-time project context (project name, engine version, current map, selected assets/actors)
 - VR/Quest/OpenXR readiness summary
 - Unified chat window (transcript + prompt composer), with **Enter** to send and **Shift+Enter** for newline
+- **Upload button** in chat composer to attach files/screenshots to the next request
 - Built-in thinking indicator (`Copilot is thinking...`) while backend/model work is in flight
 - Persistent user handle + running chat transcript (`Handle: prompt` and `Model (returned-id): response`)
 - 20+ action buttons (Analyze Selection, Generate C++ Class, Preview Patch, Trigger Compile, etc.)
@@ -92,7 +94,7 @@ Copilot /help              Show all commands
 
 | Requirement | Details |
 |-------------|---------|
-| **Unreal Engine** | 5.3 or later (tested on 5.4 and 5.5) |
+| **Unreal Engine** | 5.3 or later (tested on 5.6 and 5.7) |
 | **Platform** | Windows (macOS/Linux should compile but are untested) |
 | **GitHub Copilot** | Active subscription — Individual, Business, or Enterprise |
 | **Compiler** | Visual Studio 2022 or compatible (for editor module) |
@@ -244,7 +246,7 @@ Open via **Window → GitHub Copilot**. The panel has:
 | **Status Bar** | Connection status, active model, refresh button |
 | **Context** | Auto-detected project name, engine version, current map, selected assets/actors |
 | **VR/Quest** | OpenXR/MetaXR status, detected VR actors (collapsible) |
-| **Chat** | Running transcript plus prompt composer in one area (`Enter` sends, `Shift+Enter` adds newline) |
+| **Chat** | Running transcript + prompt composer, upload controls, and request-aware thinking indicator (`Enter` sends, `Shift+Enter` newline) |
 | **Target Inputs** | Target path + optional line number for patch/insert/open/create operations |
 | **Actions** | Button rows for common commands |
 | **Diff** | Code diff preview (collapsible) |
@@ -267,6 +269,14 @@ List all files in my Source directory
 
 What plugins are enabled in my project? Is it ready for Quest deployment?
 ```
+
+### Attachments (Upload Button)
+
+1. Click **Upload** in the chat row.
+2. Pick one or more files (images, `.txt`, `.md`, `.json`, `.cpp`, `.h`, etc.).
+3. Confirm the attachment summary line updates.
+4. Send a prompt or run a backend action — attachments are included in that request.
+5. Use **Clear Uploads** to reset before the next request.
 
 ### Slash Commands
 
@@ -355,8 +365,8 @@ Go to **Edit → Project Settings → Plugins → GitHub Copilot UE**
 | Backend Type | `GitHubCopilot` | Backend service type |
 | Endpoint URL | (auto-detected) | API endpoint override |
 | API Key | (empty) | Manual API key override (not needed for Copilot OAuth) |
-| Model Name | `claude-sonnet-4.5` | Default model |
-| Timeout (Seconds) | `120` | HTTP request timeout |
+| Legacy Model Name (unused for Copilot API) | (empty) | Compatibility-only field; active model comes from picker or `/model` |
+| Timeout (Seconds) | `600` | HTTP request timeout for long tool-chain requests |
 
 ### Chat
 | Setting | Default | Description |
