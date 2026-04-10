@@ -1284,17 +1284,55 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 	// else: tool call continuation — messages already have assistant + tool results
 
 	// ── Conversation trimming ──
-	// Aggressively truncate old tool results and drop stale messages to prevent 408 timeouts.
-	// The Copilot API times out around ~200KB request bodies.
+	// Aggressively prune to prevent 413 / 408 errors.
+	// The Copilot API rejects payloads around ~200KB. Tool definitions alone
+	// are ~15-25KB, so message content budget is tighter than it looks.
 	{
-		constexpr int32 MaxToolResultChars = 2000;   // Old tool results truncated to this
-		constexpr int32 MaxOldAssistantChars = 4000;  // Old assistant messages truncated to this
-		constexpr int32 MaxPayloadChars = 120000;     // ~120KB target (well under API timeout)
-		constexpr int32 KeepRecentMessages = 16;      // Keep the last N messages fully intact
-		constexpr int32 MinMessagesToKeep = 4;         // Absolute minimum: system + last few turns
+		constexpr int32 MaxToolResultChars = 1500;
+		constexpr int32 MaxOldAssistantChars = 3000;
+		constexpr int32 MaxPayloadChars = 65000;      // ~65KB content target (tools add ~20KB on top)
+		constexpr int32 KeepRecentMessages = 10;
+		constexpr int32 MinMessagesToKeep = 4;
 
-		// Pass 1: Truncate old tool/assistant content (keep recent messages intact)
 		int32 RecentStart = FMath::Max(1, ConvoMessages.Num() - KeepRecentMessages);
+
+		// Pass 1: Strip base64 images from old messages (they're huge)
+		for (int32 i = 1; i < RecentStart; ++i)
+		{
+			TSharedPtr<FJsonObject> Msg = ConvoMessages[i]->AsObject();
+			if (!Msg.IsValid()) continue;
+
+			// Handle multipart content arrays (vision messages with image_url)
+			if (Msg->HasTypedField<EJson::Array>(TEXT("content")))
+			{
+				TArray<TSharedPtr<FJsonValue>> Parts = Msg->GetArrayField(TEXT("content"));
+				TArray<TSharedPtr<FJsonValue>> TextOnly;
+				for (const auto& Part : Parts)
+				{
+					if (Part.IsValid() && Part->AsObject().IsValid())
+					{
+						FString Type = Part->AsObject()->GetStringField(TEXT("type"));
+						if (Type != TEXT("image_url"))
+						{
+							TextOnly.Add(Part);
+						}
+					}
+				}
+				if (TextOnly.Num() != Parts.Num())
+				{
+					if (TextOnly.Num() > 0)
+					{
+						Msg->SetArrayField(TEXT("content"), TextOnly);
+					}
+					else
+					{
+						Msg->SetStringField(TEXT("content"), TEXT("[image removed for size]"));
+					}
+				}
+			}
+		}
+
+		// Pass 2: Truncate old tool/assistant content
 		for (int32 i = 1; i < RecentStart; ++i)
 		{
 			TSharedPtr<FJsonObject> Msg = ConvoMessages[i]->AsObject();
@@ -1312,44 +1350,84 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 			}
 			else if (Role == TEXT("assistant"))
 			{
-				FString Content = Msg->GetStringField(TEXT("content"));
-				if (Content.Len() > MaxOldAssistantChars)
+				if (Msg->HasTypedField<EJson::String>(TEXT("content")))
 				{
-					Content = Content.Left(MaxOldAssistantChars) + TEXT("\n...[truncated]");
-					Msg->SetStringField(TEXT("content"), Content);
+					FString Content = Msg->GetStringField(TEXT("content"));
+					if (Content.Len() > MaxOldAssistantChars)
+					{
+						Content = Content.Left(MaxOldAssistantChars) + TEXT("\n...[truncated]");
+						Msg->SetStringField(TEXT("content"), Content);
+					}
+				}
+				// Also strip tool_calls arguments from old assistant messages
+				if (Msg->HasField(TEXT("tool_calls")))
+				{
+					for (const auto& TC : Msg->GetArrayField(TEXT("tool_calls")))
+					{
+						if (TC.IsValid() && TC->AsObject().IsValid())
+						{
+							TSharedPtr<FJsonObject> Func = TC->AsObject()->GetObjectField(TEXT("function"));
+							if (Func.IsValid())
+							{
+								FString Args = Func->GetStringField(TEXT("arguments"));
+								if (Args.Len() > 500)
+								{
+									Func->SetStringField(TEXT("arguments"), Args.Left(500) + TEXT("..."));
+								}
+							}
+						}
+					}
 				}
 			}
 		}
 
-		// Pass 2: Estimate total size and drop old messages if still too large
+		// Pass 3: Estimate total payload and drop old messages if still too large
 		auto EstimatePayloadSize = [](const TArray<TSharedPtr<FJsonValue>>& Msgs) -> int32
 		{
 			int32 Total = 0;
 			for (const TSharedPtr<FJsonValue>& MsgVal : Msgs)
 			{
-				if (MsgVal.IsValid() && MsgVal->AsObject().IsValid())
+				if (!MsgVal.IsValid() || !MsgVal->AsObject().IsValid()) continue;
+				const TSharedPtr<FJsonObject>& MsgObj = MsgVal->AsObject();
+
+				// Count string content
+				if (MsgObj->HasTypedField<EJson::String>(TEXT("content")))
 				{
-					const TSharedPtr<FJsonObject>& MsgObj = MsgVal->AsObject();
-					if (MsgObj->HasTypedField<EJson::String>(TEXT("content")))
+					Total += MsgObj->GetStringField(TEXT("content")).Len();
+				}
+				// Count array content (multipart with text + images)
+				else if (MsgObj->HasTypedField<EJson::Array>(TEXT("content")))
+				{
+					for (const auto& Part : MsgObj->GetArrayField(TEXT("content")))
 					{
-						Total += MsgObj->GetStringField(TEXT("content")).Len();
-					}
-					else if (MsgObj->HasTypedField<EJson::Array>(TEXT("content")))
-					{
-						for (const auto& Part : MsgObj->GetArrayField(TEXT("content")))
+						if (Part.IsValid() && Part->AsObject().IsValid())
 						{
-							if (Part.IsValid() && Part->AsObject().IsValid())
+							const TSharedPtr<FJsonObject>& P = Part->AsObject();
+							if (P->HasField(TEXT("text")))
+								Total += P->GetStringField(TEXT("text")).Len();
+							if (P->HasField(TEXT("image_url")))
 							{
-								const TSharedPtr<FJsonObject>& PartObj = Part->AsObject();
-								if (PartObj->HasField(TEXT("text")))
-									Total += PartObj->GetStringField(TEXT("text")).Len();
-								if (PartObj->HasField(TEXT("url")))
-									Total += PartObj->GetStringField(TEXT("url")).Len();
+								TSharedPtr<FJsonObject> ImgObj = P->GetObjectField(TEXT("image_url"));
+								if (ImgObj.IsValid() && ImgObj->HasField(TEXT("url")))
+									Total += ImgObj->GetStringField(TEXT("url")).Len();
 							}
 						}
 					}
-					Total += 100; // overhead for role, JSON structure
 				}
+				// Count tool_calls arguments
+				if (MsgObj->HasField(TEXT("tool_calls")))
+				{
+					for (const auto& TC : MsgObj->GetArrayField(TEXT("tool_calls")))
+					{
+						if (TC.IsValid() && TC->AsObject().IsValid())
+						{
+							TSharedPtr<FJsonObject> Func = TC->AsObject()->GetObjectField(TEXT("function"));
+							if (Func.IsValid())
+								Total += Func->GetStringField(TEXT("arguments")).Len() + 50;
+						}
+					}
+				}
+				Total += 100; // JSON overhead per message
 			}
 			return Total;
 		};
