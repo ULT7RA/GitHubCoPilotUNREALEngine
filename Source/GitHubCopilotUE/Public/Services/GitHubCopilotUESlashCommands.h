@@ -104,6 +104,8 @@ private:
 	FString HandleRollback(const FString& Args);
 	FString HandleBlueprint(const FString& Args);
 	FString HandleKnowledge(const FString& Args);
+	FString HandleAllowAll();
+	FString HandleResetAllowed();
 
 	void Log(const FString& Message);
 

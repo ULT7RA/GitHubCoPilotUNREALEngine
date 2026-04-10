@@ -178,7 +178,17 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 	OnRefreshContext();
 	UpdateThinkingIndicator();
 	RefreshUploadSummary();
-	AppendToLog(TEXT("GitHub Copilot UE panel initialized"));
+
+	// Restore saved chat transcript to the display
+	if (!ChatTranscriptBuffer.IsEmpty())
+	{
+		SetResponseText(ChatTranscriptBuffer);
+		AppendToLog(TEXT("Restored previous conversation from disk"));
+	}
+	else
+	{
+		AppendToLog(TEXT("GitHub Copilot UE panel initialized"));
+	}
 
 	// Update auth status
 	if (BridgeService.IsValid())

@@ -48,6 +48,10 @@
 #include "IImageWrapperModule.h"
 #include "IImageWrapper.h"
 
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <Windows.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+
 namespace
 {
 	static FString SanitizeAssetName(const FString& InName)
@@ -1883,14 +1887,11 @@ FString FGitHubCopilotUEToolExecutor::Tool_CaptureViewport(const TSharedPtr<FJso
 {
 	FString OutputPath = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CopilotViewportCapture.png"));
 
-	// Delete stale capture so we can detect if the new one succeeds
 	if (FPaths::FileExists(OutputPath))
 	{
 		IFileManager::Get().Delete(*OutputPath);
 	}
 
-	// Optional target: "main" (largest window, default), "active" (focused),
-	// or a substring to match against window titles (e.g. "Blueprint", "Material")
 	FString Target = TEXT("main");
 	if (Args.IsValid() && Args->HasField(TEXT("target")))
 	{
@@ -1898,7 +1899,6 @@ FString FGitHubCopilotUEToolExecutor::Tool_CaptureViewport(const TSharedPtr<FJso
 	}
 
 	const TArray<TSharedRef<SWindow>>& AllWindows = FSlateApplication::Get().GetInteractiveTopLevelWindows();
-
 	TSharedPtr<SWindow> ChosenWindow;
 	FString ChosenTitle;
 
@@ -1906,13 +1906,10 @@ FString FGitHubCopilotUEToolExecutor::Tool_CaptureViewport(const TSharedPtr<FJso
 	{
 		ChosenWindow = FSlateApplication::Get().GetActiveTopLevelWindow();
 		if (ChosenWindow.IsValid())
-		{
 			ChosenTitle = ChosenWindow->GetTitle().ToString();
-		}
 	}
 	else if (Target == TEXT("main"))
 	{
-		// Pick the largest window by pixel area — this is the main editor
 		int64 LargestArea = 0;
 		for (const TSharedRef<SWindow>& Win : AllWindows)
 		{
@@ -1928,7 +1925,6 @@ FString FGitHubCopilotUEToolExecutor::Tool_CaptureViewport(const TSharedPtr<FJso
 	}
 	else
 	{
-		// Match by title substring (case-insensitive)
 		for (const TSharedRef<SWindow>& Win : AllWindows)
 		{
 			FString Title = Win->GetTitle().ToString();
@@ -1939,7 +1935,6 @@ FString FGitHubCopilotUEToolExecutor::Tool_CaptureViewport(const TSharedPtr<FJso
 				break;
 			}
 		}
-		// If no title match, list available windows for the model
 		if (!ChosenWindow.IsValid())
 		{
 			FString WindowList;
@@ -1955,7 +1950,6 @@ FString FGitHubCopilotUEToolExecutor::Tool_CaptureViewport(const TSharedPtr<FJso
 
 	if (!ChosenWindow.IsValid() && AllWindows.Num() > 0)
 	{
-		// Ultimate fallback: largest window
 		int64 LargestArea = 0;
 		for (const TSharedRef<SWindow>& Win : AllWindows)
 		{
@@ -1972,31 +1966,87 @@ FString FGitHubCopilotUEToolExecutor::Tool_CaptureViewport(const TSharedPtr<FJso
 
 	if (ChosenWindow.IsValid())
 	{
-		// Use Slate's TakeScreenshot to capture the window content widget
+		// Use Windows native PrintWindow to capture actual rendered pixels
+		// Slate TakeScreenshot cannot capture GPU-rendered viewports or Blueprint graphs
+		TSharedPtr<FGenericWindow> NativeWindow = ChosenWindow->GetNativeWindow();
+		if (NativeWindow.IsValid())
+		{
+			HWND Hwnd = (HWND)NativeWindow->GetOSWindowHandle();
+			if (Hwnd)
+			{
+				RECT ClientRect;
+				GetClientRect(Hwnd, &ClientRect);
+				int32 Width = ClientRect.right - ClientRect.left;
+				int32 Height = ClientRect.bottom - ClientRect.top;
+
+				if (Width > 0 && Height > 0)
+				{
+					HDC WindowDC = GetDC(Hwnd);
+					HDC MemDC = CreateCompatibleDC(WindowDC);
+					HBITMAP HBmp = CreateCompatibleBitmap(WindowDC, Width, Height);
+					HBITMAP OldBmp = (HBITMAP)SelectObject(MemDC, HBmp);
+
+					// PW_RENDERFULLCONTENT (0x2) captures DX/GPU rendered content
+					BOOL bPrintOk = PrintWindow(Hwnd, MemDC, PW_CLIENTONLY | 0x2);
+					if (!bPrintOk)
+					{
+						BitBlt(MemDC, 0, 0, Width, Height, WindowDC, 0, 0, SRCCOPY);
+					}
+
+					BITMAPINFO BmpInfo;
+					FMemory::Memzero(&BmpInfo, sizeof(BmpInfo));
+					BmpInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+					BmpInfo.bmiHeader.biWidth = Width;
+					BmpInfo.bmiHeader.biHeight = -Height;
+					BmpInfo.bmiHeader.biPlanes = 1;
+					BmpInfo.bmiHeader.biBitCount = 32;
+					BmpInfo.bmiHeader.biCompression = BI_RGB;
+
+					TArray<FColor> PixelData;
+					PixelData.SetNumUninitialized(Width * Height);
+					GetDIBits(MemDC, HBmp, 0, Height, PixelData.GetData(), &BmpInfo, DIB_RGB_COLORS);
+
+					SelectObject(MemDC, OldBmp);
+					DeleteObject(HBmp);
+					DeleteDC(MemDC);
+					ReleaseDC(Hwnd, WindowDC);
+
+					IImageWrapperModule& ImgModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+					TSharedPtr<IImageWrapper> PngWrapper = ImgModule.CreateImageWrapper(EImageFormat::PNG);
+					if (PngWrapper.IsValid() && PngWrapper->SetRaw(PixelData.GetData(), PixelData.Num() * sizeof(FColor), Width, Height, ERGBFormat::BGRA, 8))
+					{
+						const TArray64<uint8>& PngData = PngWrapper->GetCompressed();
+						if (FFileHelper::SaveArrayToFile(PngData, *OutputPath))
+						{
+							return FString::Printf(TEXT("__RENDER_IMAGE__:%s\nCaptured window \"%s\" (%dx%d) via native capture"), *OutputPath, *ChosenTitle, Width, Height);
+						}
+					}
+				}
+			}
+		}
+
+		// Fallback: Slate capture if native path fails
 		TArray<FColor> PixelData;
 		FIntVector OutSize;
 		TSharedRef<SWidget> WindowContent = ChosenWindow->GetContent();
 		bool bCaptured = FSlateApplication::Get().TakeScreenshot(WindowContent, PixelData, OutSize);
 		if (bCaptured && PixelData.Num() > 0 && OutSize.X > 0 && OutSize.Y > 0)
 		{
-			// Encode to PNG
-			IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
-			TSharedPtr<IImageWrapper> PngWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+			IImageWrapperModule& ImgModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+			TSharedPtr<IImageWrapper> PngWrapper = ImgModule.CreateImageWrapper(EImageFormat::PNG);
 			if (PngWrapper.IsValid() && PngWrapper->SetRaw(PixelData.GetData(), PixelData.Num() * sizeof(FColor), OutSize.X, OutSize.Y, ERGBFormat::BGRA, 8))
 			{
 				const TArray64<uint8>& PngData = PngWrapper->GetCompressed();
 				if (FFileHelper::SaveArrayToFile(PngData, *OutputPath))
 				{
-					return FString::Printf(TEXT("__RENDER_IMAGE__:%s\nCaptured window \"%s\" (%dx%d)"), *OutputPath, *ChosenTitle, OutSize.X, OutSize.Y);
+					return FString::Printf(TEXT("__RENDER_IMAGE__:%s\nCaptured window \"%s\" (%dx%d) via Slate"), *OutputPath, *ChosenTitle, OutSize.X, OutSize.Y);
 				}
 			}
 		}
 	}
 
-	// Fallback: use FScreenshotRequest for game viewport
 	FScreenshotRequest::RequestScreenshot(OutputPath, false, false);
 	FPlatformProcess::Sleep(1.5f);
-
 	if (FPaths::FileExists(OutputPath))
 	{
 		return FString::Printf(TEXT("__RENDER_IMAGE__:%s\nViewport captured (game viewport): %s"), *OutputPath, *OutputPath);

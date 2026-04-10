@@ -326,8 +326,8 @@ bool FGitHubCopilotUESlashCommands::ExecuteSlashCommand(const FString& Input, FS
 	else if (MatchedName == TEXT("feedback")) OutResponse = TEXT("Feedback: Visit https://github.com/features/copilot to provide feedback on GitHub Copilot.");
 	else if (MatchedName == TEXT("extensions")) OutResponse = TEXT("Extensions are managed through your GitHub Copilot subscription settings at https://github.com/settings/copilot");
 	else if (MatchedName == TEXT("experimental")) OutResponse = TEXT("Experimental features are managed in Project Settings -> Plugins -> GitHub Copilot UE.");
-	else if (MatchedName == TEXT("allow-all")) OutResponse = HandleAddDir(TEXT("*"));
-	else if (MatchedName == TEXT("reset-allowed-tools")) OutResponse = TEXT("Allowed tools have been reset. Configure in Project Settings -> Plugins -> GitHub Copilot UE.");
+	else if (MatchedName == TEXT("allow-all")) OutResponse = HandleAllowAll();
+	else if (MatchedName == TEXT("reset-allowed-tools")) OutResponse = HandleResetAllowed();
 	else if (MatchedName == TEXT("instructions")) OutResponse = HandleInit(TEXT("show"));
 	else if (MatchedName == TEXT("delegate")) { OnSendPrompt.ExecuteIfBound(ECopilotCommandType::AnalyzeProject, TEXT("Create a PR with the following changes: ") + Args); OutResponse = TEXT("Delegating to Copilot for PR creation..."); }
 	else
@@ -1263,6 +1263,42 @@ FString FGitHubCopilotUESlashCommands::HandleBlueprint(const FString& Args)
 {
 	OnSendPrompt.ExecuteIfBound(ECopilotCommandType::CreateBlueprintFunctionLibrary, Args);
 	return FString::Printf(TEXT("Creating Blueprint Function Library: %s"), *Args);
+}
+
+FString FGitHubCopilotUESlashCommands::HandleAllowAll()
+{
+	UGitHubCopilotUESettings* Settings = GetMutableDefault<UGitHubCopilotUESettings>();
+	if (!Settings)
+	{
+		return TEXT("ERROR: Could not access settings.");
+	}
+
+	Settings->bAllowAllFileAccess = !Settings->bAllowAllFileAccess;
+	Settings->SaveConfig();
+
+	if (Settings->bAllowAllFileAccess)
+	{
+		return TEXT("All file access ENABLED. The AI can now read/write any path on your system.\nUse /allow-all again to disable, or /reset-allowed-tools to reset everything.");
+	}
+	else
+	{
+		return TEXT("All file access DISABLED. The AI is restricted to the project directory and any additional allowed paths.\nConfigure paths in Project Settings > Plugins > GitHub Copilot UE.");
+	}
+}
+
+FString FGitHubCopilotUESlashCommands::HandleResetAllowed()
+{
+	UGitHubCopilotUESettings* Settings = GetMutableDefault<UGitHubCopilotUESettings>();
+	if (!Settings)
+	{
+		return TEXT("ERROR: Could not access settings.");
+	}
+
+	Settings->bAllowAllFileAccess = false;
+	Settings->AdditionalAllowedPaths.Empty();
+	Settings->SaveConfig();
+
+	return TEXT("All permissions reset.\n  - File access restricted to project directory only\n  - Additional allowed paths cleared\nConfigure in Project Settings > Plugins > GitHub Copilot UE.");
 }
 
 void FGitHubCopilotUESlashCommands::Log(const FString& Message)
