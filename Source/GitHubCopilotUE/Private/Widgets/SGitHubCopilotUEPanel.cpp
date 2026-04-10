@@ -25,8 +25,15 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Misc/DateTime.h"
 #include "Misc/Paths.h"
+#include "Misc/FileHelper.h"
 #include "Async/Async.h"
 #include "InputCoreTypes.h"
+#include "IImageWrapperModule.h"
+#include "IImageWrapper.h"
+
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <Windows.h>
+#include "Windows/HideWindowsPlatformTypes.h"
 
 #define LOCTEXT_NAMESPACE "SGitHubCopilotUEPanel"
 
@@ -621,6 +628,14 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 							OnSendPrompt();
 							return FReply::Handled();
 						}
+						// Intercept Ctrl+V to check for clipboard image
+						if (KeyEvent.GetKey() == EKeys::V && KeyEvent.IsControlDown())
+						{
+							if (TryPasteClipboardImage())
+							{
+								return FReply::Handled();
+							}
+						}
 						return FReply::Unhandled();
 					}))
 				]
@@ -956,6 +971,93 @@ void SGitHubCopilotUEPanel::OnClearUploads()
 	PendingUploadPaths.Empty();
 	RefreshUploadSummary();
 	AppendToLog(TEXT("Cleared attached files."));
+}
+
+bool SGitHubCopilotUEPanel::TryPasteClipboardImage()
+{
+	// Check Windows clipboard for image data (CF_BITMAP or CF_DIB)
+	if (!OpenClipboard(NULL))
+	{
+		return false;
+	}
+
+	bool bHandled = false;
+
+	if (IsClipboardFormatAvailable(CF_DIB) || IsClipboardFormatAvailable(CF_BITMAP))
+	{
+		HANDLE hData = GetClipboardData(CF_DIB);
+		if (hData)
+		{
+			BITMAPINFOHEADER* pBIH = (BITMAPINFOHEADER*)GlobalLock(hData);
+			if (pBIH)
+			{
+				int32 Width = pBIH->biWidth;
+				int32 Height = FMath::Abs(pBIH->biHeight);
+				bool bTopDown = (pBIH->biHeight < 0);
+
+				if (Width > 0 && Height > 0 && pBIH->biBitCount >= 24)
+				{
+					int32 BitsPerPixel = pBIH->biBitCount;
+					int32 RowBytes = ((Width * BitsPerPixel + 31) / 32) * 4;
+					uint8* pPixels = (uint8*)pBIH + pBIH->biSize + pBIH->biClrUsed * 4;
+
+					TArray<FColor> PixelData;
+					PixelData.SetNumUninitialized(Width * Height);
+
+					for (int32 y = 0; y < Height; ++y)
+					{
+						int32 SrcRow = bTopDown ? y : (Height - 1 - y);
+						uint8* pRow = pPixels + SrcRow * RowBytes;
+						for (int32 x = 0; x < Width; ++x)
+						{
+							int32 Idx = y * Width + x;
+							if (BitsPerPixel == 32)
+							{
+								PixelData[Idx].B = pRow[x * 4 + 0];
+								PixelData[Idx].G = pRow[x * 4 + 1];
+								PixelData[Idx].R = pRow[x * 4 + 2];
+								PixelData[Idx].A = pRow[x * 4 + 3];
+							}
+							else
+							{
+								PixelData[Idx].B = pRow[x * 3 + 0];
+								PixelData[Idx].G = pRow[x * 3 + 1];
+								PixelData[Idx].R = pRow[x * 3 + 2];
+								PixelData[Idx].A = 255;
+							}
+						}
+					}
+
+					GlobalUnlock(hData);
+					CloseClipboard();
+
+					// Encode to PNG and save
+					IImageWrapperModule& ImgModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+					TSharedPtr<IImageWrapper> PngWrapper = ImgModule.CreateImageWrapper(EImageFormat::PNG);
+					if (PngWrapper.IsValid() && PngWrapper->SetRaw(PixelData.GetData(), PixelData.Num() * sizeof(FColor), Width, Height, ERGBFormat::BGRA, 8))
+					{
+						const TArray64<uint8>& PngData = PngWrapper->GetCompressed();
+						FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+						FString SavePath = FPaths::Combine(FPaths::ProjectSavedDir(), FString::Printf(TEXT("CopilotPaste_%s.png"), *Timestamp));
+						if (FFileHelper::SaveArrayToFile(PngData, *SavePath))
+						{
+							PendingUploadPaths.Add(SavePath);
+							RefreshUploadSummary();
+							AppendToLog(FString::Printf(TEXT("Pasted image from clipboard: %dx%d (%s)"), Width, Height, *FPaths::GetCleanFilename(SavePath)));
+							return true;
+						}
+					}
+
+					return false; // PNG encode failed
+				}
+
+				GlobalUnlock(hData);
+				}
+		}
+	}
+
+	CloseClipboard();
+	return bHandled;
 }
 
 void SGitHubCopilotUEPanel::OnCopyResponse()

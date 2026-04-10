@@ -52,6 +52,7 @@ private:
 	void OnActionButton(ECopilotCommandType CommandType);
 	void OnUploadFiles();
 	void OnClearUploads();
+	bool TryPasteClipboardImage();
 	void OnCopyResponse();
 	void OnClearAll();
 	void OnApplyPatch();
