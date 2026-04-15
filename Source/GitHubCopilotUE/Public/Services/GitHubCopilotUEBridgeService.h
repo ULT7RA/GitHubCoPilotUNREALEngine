@@ -284,6 +284,8 @@ private:
 	TMap<FString, TArray<TSharedPtr<FJsonValue>>> ActiveConversations; // ConversationId -> messages array (persistent across turns)
 	TMap<FString, int32> ToolCallIterations; // RequestId -> iteration count (safety limit)
 	TSet<FString> ForcedFinalResponseRequestIds; // Requests that already switched to no-tool finalization
+	TMap<FString, int32> LengthContinuationCounts; // RequestId -> how many times we auto-continued on finish_reason=length
+	TMap<FString, FString> AccumulatedLengthContent; // RequestId -> accumulated partial content from length continuations
 
 	// Persistent conversation ID — survives panel recreation
 	FString CurrentConversationId;

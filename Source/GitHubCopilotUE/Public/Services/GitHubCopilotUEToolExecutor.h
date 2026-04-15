@@ -59,6 +59,37 @@ private:
 	FString Tool_WebSearch(const TSharedPtr<FJsonObject>& Args);
 	FString Tool_CaptureViewport(const TSharedPtr<FJsonObject>& Args);
 
+	// Tier 1 — core autonomy tools
+	FString Tool_ExecutePython(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_ExecuteConsoleCommand(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_ExecuteShell(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_PlayInEditor(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_StopPIE(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_PackageProject(const TSharedPtr<FJsonObject>& Args);
+
+	// Tier 2 — scene & asset tools
+	FString Tool_ListActors(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_GetActorProperties(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_SetActorProperties(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_DeleteActors(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_ImportAsset(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_OpenLevel(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_RenameAsset(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_GetSelectedActors(const TSharedPtr<FJsonObject>& Args);
+
+	// Tier 3 — specialized tools
+	FString Tool_RetargetAnimations(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_CreateAnimMontage(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_CreateLevelSequence(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_BuildLighting(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_GetProjectSettings(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_SetProjectSettings(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_GetBlueprintGraph(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_AddBlueprintNode(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_GitCommit(const TSharedPtr<FJsonObject>& Args);
+	FString Tool_GitPush(const TSharedPtr<FJsonObject>& Args);
+
 	/** Resolve a path — if relative, treat it as relative to project root */
 	FString ResolvePath(const FString& InputPath) const;
 

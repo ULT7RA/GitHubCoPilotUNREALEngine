@@ -36,7 +36,14 @@ PrivateDependencyModuleNames.AddRange(new string[]
 "EditorSubsystem",
 "DesktopPlatform",
 "SourceControl",
-"GameProjectGeneration"
+"GameProjectGeneration",
+"AssetTools",
+"KismetCompiler",
+"BlueprintGraph",
+"Kismet",
+"UMGEditor",
+"LevelSequence",
+"Niagara"
 });
 
 // UE 5.1+ uses EditorFramework for some toolbar APIs.

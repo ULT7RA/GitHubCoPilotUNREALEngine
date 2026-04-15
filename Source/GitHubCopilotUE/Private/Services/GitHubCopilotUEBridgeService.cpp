@@ -13,6 +13,8 @@
 #include "Misc/Paths.h"
 #include "HAL/PlatformProcess.h"
 #include "GenericPlatform/GenericPlatformHttp.h"
+#include "IImageWrapperModule.h"
+#include "IImageWrapper.h"
 
 namespace
 {
@@ -1284,55 +1286,59 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 	// else: tool call continuation — messages already have assistant + tool results
 
 	// ── Conversation trimming ──
-	// Aggressively prune to prevent 413 / 408 errors.
-	// The Copilot API rejects payloads around ~200KB. Tool definitions alone
-	// are ~15-25KB, so message content budget is tighter than it looks.
+	// Smart pruning to prevent 413 / 408 errors while NEVER losing user context.
+	// Root cause of context loss bug: old trimmer used RemoveAt(1) which deleted
+	// the user's original message first. This rewrite protects all user messages.
 	{
-		constexpr int32 MaxToolResultChars = 1500;
-		constexpr int32 MaxOldAssistantChars = 3000;
-		constexpr int32 MaxPayloadChars = 65000;      // ~65KB content target (tools add ~20KB on top)
-		constexpr int32 KeepRecentMessages = 10;
-		constexpr int32 MinMessagesToKeep = 4;
+		constexpr int32 MaxToolResultChars = 4000;
+		constexpr int32 MaxOldAssistantChars = 6000;
+		constexpr int32 MaxPayloadChars = 400000;     // ~400KB — models support 128K+ tokens
+		constexpr int32 KeepRecentMessages = 40;       // recent window where content is kept verbatim
 
 		int32 RecentStart = FMath::Max(1, ConvoMessages.Num() - KeepRecentMessages);
 
-		// Pass 1: Strip base64 images from old messages (they're huge)
+		// Pass 1: Strip base64 images from ALL non-recent messages.
+		// Once the model has seen an image and responded, replace it with a text
+		// placeholder. A single base64 image can be 200KB-7MB; this is the #1
+		// cause of context overflow.
 		for (int32 i = 1; i < RecentStart; ++i)
 		{
 			TSharedPtr<FJsonObject> Msg = ConvoMessages[i]->AsObject();
 			if (!Msg.IsValid()) continue;
 
-			// Handle multipart content arrays (vision messages with image_url)
 			if (Msg->HasTypedField<EJson::Array>(TEXT("content")))
 			{
 				TArray<TSharedPtr<FJsonValue>> Parts = Msg->GetArrayField(TEXT("content"));
+				bool bHadImage = false;
 				TArray<TSharedPtr<FJsonValue>> TextOnly;
 				for (const auto& Part : Parts)
 				{
 					if (Part.IsValid() && Part->AsObject().IsValid())
 					{
 						FString Type = Part->AsObject()->GetStringField(TEXT("type"));
-						if (Type != TEXT("image_url"))
+						if (Type == TEXT("image_url"))
+						{
+							bHadImage = true;
+						}
+						else
 						{
 							TextOnly.Add(Part);
 						}
 					}
 				}
-				if (TextOnly.Num() != Parts.Num())
+				if (bHadImage)
 				{
-					if (TextOnly.Num() > 0)
-					{
-						Msg->SetArrayField(TEXT("content"), TextOnly);
-					}
-					else
-					{
-						Msg->SetStringField(TEXT("content"), TEXT("[image removed for size]"));
-					}
+					// Replace image with text summary so model knows an image was here
+					TSharedPtr<FJsonObject> SummaryPart = MakeShareable(new FJsonObject);
+					SummaryPart->SetStringField(TEXT("type"), TEXT("text"));
+					SummaryPart->SetStringField(TEXT("text"), TEXT("[A viewport screenshot was shown here and analyzed by the model]"));
+					TextOnly.Add(MakeShareable(new FJsonValueObject(SummaryPart)));
+					Msg->SetArrayField(TEXT("content"), TextOnly);
 				}
 			}
 		}
 
-		// Pass 2: Truncate old tool/assistant content
+		// Pass 2: Truncate old tool/assistant content (not user messages!)
 		for (int32 i = 1; i < RecentStart; ++i)
 		{
 			TSharedPtr<FJsonObject> Msg = ConvoMessages[i]->AsObject();
@@ -1359,7 +1365,6 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 						Msg->SetStringField(TEXT("content"), Content);
 					}
 				}
-				// Also strip tool_calls arguments from old assistant messages
 				if (Msg->HasField(TEXT("tool_calls")))
 				{
 					for (const auto& TC : Msg->GetArrayField(TEXT("tool_calls")))
@@ -1372,16 +1377,18 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 								FString Args = Func->GetStringField(TEXT("arguments"));
 								if (Args.Len() > 500)
 								{
-									Func->SetStringField(TEXT("arguments"), Args.Left(500) + TEXT("..."));
+									// Replace with valid empty JSON — truncated JSON breaks the API
+									Func->SetStringField(TEXT("arguments"), TEXT("{}"));
 								}
 							}
 						}
 					}
 				}
 			}
+			// NOTE: user messages are NEVER truncated — they contain the context
 		}
 
-		// Pass 3: Estimate total payload and drop old messages if still too large
+		// Payload estimator
 		auto EstimatePayloadSize = [](const TArray<TSharedPtr<FJsonValue>>& Msgs) -> int32
 		{
 			int32 Total = 0;
@@ -1390,12 +1397,10 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 				if (!MsgVal.IsValid() || !MsgVal->AsObject().IsValid()) continue;
 				const TSharedPtr<FJsonObject>& MsgObj = MsgVal->AsObject();
 
-				// Count string content
 				if (MsgObj->HasTypedField<EJson::String>(TEXT("content")))
 				{
 					Total += MsgObj->GetStringField(TEXT("content")).Len();
 				}
-				// Count array content (multipart with text + images)
 				else if (MsgObj->HasTypedField<EJson::Array>(TEXT("content")))
 				{
 					for (const auto& Part : MsgObj->GetArrayField(TEXT("content")))
@@ -1414,7 +1419,6 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 						}
 					}
 				}
-				// Count tool_calls arguments
 				if (MsgObj->HasField(TEXT("tool_calls")))
 				{
 					for (const auto& TC : MsgObj->GetArrayField(TEXT("tool_calls")))
@@ -1432,16 +1436,62 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 			return Total;
 		};
 
+		// Pass 3: If still over budget, drop OLD messages — but NEVER user messages.
+		// Priority: drop tool results first, then assistant messages, then as last
+		// resort drop tool_calls+tool pairs. User messages are always preserved.
 		int32 PayloadEstimate = EstimatePayloadSize(ConvoMessages);
-		if (PayloadEstimate > MaxPayloadChars && ConvoMessages.Num() > MinMessagesToKeep)
+		if (PayloadEstimate > MaxPayloadChars && ConvoMessages.Num() > 4)
 		{
-			Log(FString::Printf(TEXT("BridgeService: [PRUNE] Payload %d chars (%d msgs) — dropping old messages"),
+			Log(FString::Printf(TEXT("BridgeService: [PRUNE] Payload %d chars (%d msgs) — need to trim"),
 				PayloadEstimate, ConvoMessages.Num()));
 
-			while (PayloadEstimate > MaxPayloadChars && ConvoMessages.Num() > MinMessagesToKeep)
+			// First pass: drop old tool result messages (role=tool) from before recent window
+			// Must also drop the corresponding assistant tool_calls message to keep valid structure
+			for (int32 i = 1; i < RecentStart && PayloadEstimate > MaxPayloadChars; ++i)
 			{
-				ConvoMessages.RemoveAt(1);
+				TSharedPtr<FJsonObject> Msg = ConvoMessages[i]->AsObject();
+				if (!Msg.IsValid()) continue;
+				FString Role = Msg->GetStringField(TEXT("role"));
+				if (Role == TEXT("tool"))
+				{
+					// Replace bulky tool result with a tiny summary
+					Msg->SetStringField(TEXT("content"), TEXT("[tool output removed for space]"));
+					PayloadEstimate = EstimatePayloadSize(ConvoMessages);
+				}
+			}
+
+			// Second pass: truncate old assistant messages more aggressively
+			for (int32 i = 1; i < RecentStart && PayloadEstimate > MaxPayloadChars; ++i)
+			{
+				TSharedPtr<FJsonObject> Msg = ConvoMessages[i]->AsObject();
+				if (!Msg.IsValid()) continue;
+				FString Role = Msg->GetStringField(TEXT("role"));
+				if (Role == TEXT("assistant") && Msg->HasTypedField<EJson::String>(TEXT("content")))
+				{
+					FString Content = Msg->GetStringField(TEXT("content"));
+					if (Content.Len() > 500)
+					{
+						Msg->SetStringField(TEXT("content"), Content.Left(500) + TEXT("\n...[trimmed for space]"));
+						PayloadEstimate = EstimatePayloadSize(ConvoMessages);
+					}
+				}
+			}
+
+			// Last resort: drop non-user messages entirely from oldest end
+			// CRITICAL: Never drop user messages — they contain the conversation context
+			for (int32 i = 1; i < ConvoMessages.Num() - 4 && PayloadEstimate > MaxPayloadChars; )
+			{
+				TSharedPtr<FJsonObject> Msg = ConvoMessages[i]->AsObject();
+				if (!Msg.IsValid()) { ++i; continue; }
+				FString Role = Msg->GetStringField(TEXT("role"));
+				if (Role == TEXT("user"))
+				{
+					++i; // SKIP — never remove user messages
+					continue;
+				}
+				ConvoMessages.RemoveAt(i);
 				PayloadEstimate = EstimatePayloadSize(ConvoMessages);
+				// Don't increment i — next element shifted into this position
 			}
 
 			Log(FString::Printf(TEXT("BridgeService: [PRUNE] Trimmed to %d messages (%d chars)"),
@@ -1537,9 +1587,21 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 		JsonBody->SetArrayField(TEXT("messages"), ConvoMessages);
 		JsonBody->SetNumberField(TEXT("temperature"), 0.1);
 
-		// Use configurable max output tokens (default: 16384)
+		// Use configurable max output tokens — try to use the model's reported limit
+		// from /models endpoint. Fall back to settings, then 16384.
 		const UGitHubCopilotUESettings* Settings = UGitHubCopilotUESettings::Get();
-		const int32 MaxOutputTokens = Settings ? FMath::Max(1024, Settings->MaxOutputTokens) : 16384;
+		int32 MaxOutputTokens = Settings ? FMath::Max(1024, Settings->MaxOutputTokens) : 16384;
+		
+		// If we know this model's actual max_output_tokens from /models, use that
+		if (const FCopilotModel* ModelInfo = AvailableModels.FindByPredicate(
+			[&](const FCopilotModel& M) { return M.Id == ModelToUse; }))
+		{
+			if (ModelInfo->MaxOutputTokens > 0)
+			{
+				MaxOutputTokens = ModelInfo->MaxOutputTokens;
+				Log(FString::Printf(TEXT("BridgeService: Using model-reported max_output_tokens=%d for %s"), MaxOutputTokens, *ModelToUse));
+			}
+		}
 		JsonBody->SetNumberField(TEXT("max_tokens"), MaxOutputTokens);
 
 		if (bAllowToolCalls)
@@ -1899,6 +1961,24 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 			goto HandleNormalResponse;
 		}
 
+		// Validate and fix tool_calls arguments JSON before storing in history
+		// Models sometimes return malformed JSON that breaks on re-send
+		for (const TSharedPtr<FJsonValue>& TCVal : *ToolCalls)
+		{
+			if (!TCVal.IsValid() || !TCVal->AsObject().IsValid()) continue;
+			TSharedPtr<FJsonObject> Func = TCVal->AsObject()->GetObjectField(TEXT("function"));
+			if (!Func.IsValid()) continue;
+			FString RawArgs = Func->GetStringField(TEXT("arguments"));
+			TSharedPtr<FJsonObject> TestParse;
+			TSharedRef<TJsonReader<>> TestReader = TJsonReaderFactory<>::Create(RawArgs);
+			if (!FJsonSerializer::Deserialize(TestReader, TestParse) || !TestParse.IsValid())
+			{
+				Log(FString::Printf(TEXT("BridgeService: Fixed invalid tool_call arguments JSON for %s"),
+					*Func->GetStringField(TEXT("name"))));
+				Func->SetStringField(TEXT("arguments"), TEXT("{}"));
+			}
+		}
+
 		// Append the assistant's message (with tool_calls) to conversation
 		TArray<TSharedPtr<FJsonValue>>& ConvoMessages = ActiveConversations.FindOrAdd(ConversationId);
 		ConvoMessages.Add(MakeShareable(new FJsonValueObject(Message)));
@@ -1997,7 +2077,10 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 			ConvoMessages.Add(MakeShareable(new FJsonValueObject(ToolResultMsg)));
 
 			// If a tool produced a render/screenshot, inject the image as a
-			// vision message so the model can see and analyze it
+			// vision message so the model can see and analyze it.
+			// CRITICAL: Compress and resize first to avoid blowing up conversation
+			// context. A full-res PNG can be 5MB+ base64, which causes the trimmer
+			// to nuke all prior messages including the user's original prompt.
 			if (ToolResult.StartsWith(TEXT("__RENDER_IMAGE__:")))
 			{
 				FString ImageLine = ToolResult;
@@ -2011,17 +2094,82 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 				TArray<uint8> ImageData;
 				if (FFileHelper::LoadFileToArray(ImageData, *ImagePath))
 				{
-					FString Base64 = FBase64::Encode(ImageData);
-					FString Ext = FPaths::GetExtension(ImagePath).ToLower();
-					FString Mime = (Ext == TEXT("jpg") || Ext == TEXT("jpeg")) ? TEXT("image/jpeg") : TEXT("image/png");
+					// Resize to max 1024px on longest side and encode as JPEG
+					// to keep base64 under ~200KB instead of multi-MB PNG
+					IImageWrapperModule& ImgModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+					TSharedPtr<IImageWrapper> SrcWrapper = ImgModule.CreateImageWrapper(EImageFormat::PNG);
+					
+					TArray<uint8> FinalImageData;
+					FString Mime = TEXT("image/jpeg");
+					
+					if (SrcWrapper.IsValid() && SrcWrapper->SetCompressed(ImageData.GetData(), ImageData.Num()))
+					{
+						int32 SrcW = SrcWrapper->GetWidth();
+						int32 SrcH = SrcWrapper->GetHeight();
+						
+						// Decompress to raw BGRA
+						TArray<uint8> RawPixels;
+						if (SrcWrapper->GetRaw(ERGBFormat::BGRA, 8, RawPixels))
+						{
+							// Downscale if larger than 1024px
+							constexpr int32 MaxDim = 1024;
+							int32 DstW = SrcW;
+							int32 DstH = SrcH;
+							if (SrcW > MaxDim || SrcH > MaxDim)
+							{
+								float Scale = (float)MaxDim / (float)FMath::Max(SrcW, SrcH);
+								DstW = FMath::Max(1, FMath::RoundToInt(SrcW * Scale));
+								DstH = FMath::Max(1, FMath::RoundToInt(SrcH * Scale));
+								
+								// Simple box-filter downsample
+								TArray<uint8> Resized;
+								Resized.SetNumUninitialized(DstW * DstH * 4);
+								for (int32 y = 0; y < DstH; ++y)
+								{
+									for (int32 x = 0; x < DstW; ++x)
+									{
+										int32 SrcX = FMath::Min(FMath::RoundToInt(x * (float)SrcW / DstW), SrcW - 1);
+										int32 SrcY = FMath::Min(FMath::RoundToInt(y * (float)SrcH / DstH), SrcH - 1);
+										int32 SrcIdx = (SrcY * SrcW + SrcX) * 4;
+										int32 DstIdx = (y * DstW + x) * 4;
+										Resized[DstIdx + 0] = RawPixels[SrcIdx + 0];
+										Resized[DstIdx + 1] = RawPixels[SrcIdx + 1];
+										Resized[DstIdx + 2] = RawPixels[SrcIdx + 2];
+										Resized[DstIdx + 3] = RawPixels[SrcIdx + 3];
+									}
+								}
+								RawPixels = MoveTemp(Resized);
+								Log(FString::Printf(TEXT("BridgeService: Resized image %dx%d -> %dx%d for vision"), SrcW, SrcH, DstW, DstH));
+							}
+							
+							// Encode as JPEG quality 70
+							TSharedPtr<IImageWrapper> JpgWrapper = ImgModule.CreateImageWrapper(EImageFormat::JPEG);
+							if (JpgWrapper.IsValid() && JpgWrapper->SetRaw(RawPixels.GetData(), RawPixels.Num(), DstW, DstH, ERGBFormat::BGRA, 8))
+							{
+								FinalImageData = JpgWrapper->GetCompressed(70);
+							}
+						}
+					}
+					
+					// Fallback: if JPEG conversion failed, use original but it'll be big
+					if (FinalImageData.Num() == 0)
+					{
+						FinalImageData = ImageData;
+						Mime = TEXT("image/png");
+						Log(TEXT("BridgeService: JPEG conversion failed, using original PNG (may be large)"));
+					}
 
-					// Build multipart user message: [{type:text}, {type:image_url}]
+					FString Base64 = FBase64::Encode(FinalImageData);
+					Log(FString::Printf(TEXT("BridgeService: Vision image: %d bytes base64 (%s)"), Base64.Len(), *Mime));
+
+					// Build multipart user message with detail:low to minimize token usage
 					TSharedPtr<FJsonObject> TextPart = MakeShareable(new FJsonObject);
 					TextPart->SetStringField(TEXT("type"), TEXT("text"));
-					TextPart->SetStringField(TEXT("text"), TEXT("Here is the captured image. Analyze what you see and describe it."));
+					TextPart->SetStringField(TEXT("text"), TEXT("Here is the captured image. Analyze what you see and relate it to our conversation."));
 
 					TSharedPtr<FJsonObject> ImageUrlInner = MakeShareable(new FJsonObject);
 					ImageUrlInner->SetStringField(TEXT("url"), FString::Printf(TEXT("data:%s;base64,%s"), *Mime, *Base64));
+					ImageUrlInner->SetStringField(TEXT("detail"), TEXT("low"));
 
 					TSharedPtr<FJsonObject> ImagePart = MakeShareable(new FJsonObject);
 					ImagePart->SetStringField(TEXT("type"), TEXT("image_url"));
@@ -2036,8 +2184,8 @@ void FGitHubCopilotUEBridgeService::OnChatCompletionResponse(FHttpRequestPtr Htt
 					VisionMsg->SetArrayField(TEXT("content"), ContentArray);
 					ConvoMessages.Add(MakeShareable(new FJsonValueObject(VisionMsg)));
 
-					Log(FString::Printf(TEXT("BridgeService: Injected render image for vision analysis (%d bytes, %s)"),
-						ImageData.Num(), *Mime));
+					Log(FString::Printf(TEXT("BridgeService: Injected compressed vision image (%d bytes raw -> %d bytes base64)"),
+						FinalImageData.Num(), Base64.Len()));
 				}
 				else
 				{
@@ -2105,11 +2253,6 @@ HandleNormalResponse:
 	// FINAL RESPONSE — model is done, return to user
 	// ════════════════════════════════════════════════════════════════
 
-	PendingRequestTimestamps.Remove(RequestId);
-	ToolCallIterations.Remove(RequestId);
-	ForcedFinalResponseRequestIds.Remove(RequestId);
-	NoResponseRetryCounts.Remove(RequestId);
-
 	FString Content = Message->HasField(TEXT("content")) ? Message->GetStringField(TEXT("content")) : TEXT("");
 
 	// If content was in a separate choice (Claude split-choice format), use that
@@ -2117,6 +2260,63 @@ HandleNormalResponse:
 	{
 		Content = PrefixContent;
 	}
+
+	// ── Auto-continue on finish_reason=length ──
+	// The model was cut off mid-response because it hit max_tokens.
+	// Append partial response + ask it to continue, up to 3 times.
+	if (FinishReason == TEXT("length") && !Content.IsEmpty())
+	{
+		int32& ContinueCount = LengthContinuationCounts.FindOrAdd(RequestId);
+		ContinueCount++;
+		
+		if (ContinueCount <= 3) // Max 3 continuations
+		{
+			Log(FString::Printf(TEXT("BridgeService: finish_reason=length — auto-continuing (attempt %d/3, %d chars so far)"),
+				ContinueCount, Content.Len()));
+			
+			TArray<TSharedPtr<FJsonValue>>& ConvoMessages = ActiveConversations.FindOrAdd(ConversationId);
+			
+			// Append the partial assistant response
+			TSharedPtr<FJsonObject> PartialMsg = MakeShareable(new FJsonObject);
+			PartialMsg->SetStringField(TEXT("role"), TEXT("assistant"));
+			PartialMsg->SetStringField(TEXT("content"), Content);
+			ConvoMessages.Add(MakeShareable(new FJsonValueObject(PartialMsg)));
+			
+			// Ask model to continue
+			TSharedPtr<FJsonObject> ContinueMsg = MakeShareable(new FJsonObject);
+			ContinueMsg->SetStringField(TEXT("role"), TEXT("user"));
+			ContinueMsg->SetStringField(TEXT("content"), TEXT("Continue from where you left off. Do not repeat what you already said."));
+			ConvoMessages.Add(MakeShareable(new FJsonValueObject(ContinueMsg)));
+			
+			// Store partial content for concatenation later
+			FString& Accumulated = AccumulatedLengthContent.FindOrAdd(RequestId);
+			Accumulated += Content;
+			
+			FCopilotRequest ContinuationRequest;
+			ContinuationRequest.RequestId = RequestId;
+			ContinuationRequest.ConversationId = ConversationId;
+			ContinuationRequest.CommandType = ECopilotCommandType::Ask;
+			SendChatCompletion(ContinuationRequest, true);
+			return;
+		}
+		else
+		{
+			Log(TEXT("BridgeService: Max length continuations reached, returning accumulated content"));
+		}
+	}
+
+	// If we had length continuations, prepend accumulated content
+	if (FString* Accumulated = AccumulatedLengthContent.Find(RequestId))
+	{
+		Content = *Accumulated + Content;
+		AccumulatedLengthContent.Remove(RequestId);
+	}
+	LengthContinuationCounts.Remove(RequestId);
+
+	PendingRequestTimestamps.Remove(RequestId);
+	ToolCallIterations.Remove(RequestId);
+	ForcedFinalResponseRequestIds.Remove(RequestId);
+	NoResponseRetryCounts.Remove(RequestId);
 
 	// ALWAYS append assistant message to conversation for multi-turn persistence.
 	// Even if content is empty, we need the message in the chain so the model
