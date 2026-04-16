@@ -62,6 +62,7 @@ private:
 	void OnSignOut();
 	void OnRefreshModels();
 	void OnModelSelected(TSharedPtr<FString> NewModel, ESelectInfo::Type SelectInfo);
+	void OnReasoningSelected(TSharedPtr<FString> NewEffort, ESelectInfo::Type SelectInfo);
 	TSharedRef<SWidget> MakeModelComboRow(TSharedPtr<FString> Item);
 
 	// --- Event handlers ---
@@ -128,6 +129,9 @@ private:
 	TArray<TSharedPtr<FString>> ModelOptions;
 	TSharedPtr<FString> SelectedModelOption;
 	TSharedPtr<SComboBox<TSharedPtr<FString>>> ModelComboBox;
+	TArray<TSharedPtr<FString>> ReasoningOptions;
+	TSharedPtr<FString> SelectedReasoningOption;
+	TSharedPtr<SComboBox<TSharedPtr<FString>>> ReasoningComboBox;
 
 	// Delegate handles for safe unbinding on destroy
 	FDelegateHandle ResponseDelegateHandle;

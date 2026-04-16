@@ -63,6 +63,12 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 	}
 
 	// Wire up delegates — store handles for safe cleanup in destructor
+
+	// Initialize reasoning effort options
+	ReasoningOptions.Add(MakeShareable(new FString(TEXT("low"))));
+	ReasoningOptions.Add(MakeShareable(new FString(TEXT("medium"))));
+	ReasoningOptions.Add(MakeShareable(new FString(TEXT("high"))));
+	SelectedReasoningOption = ReasoningOptions[1]; // default: medium
 	if (CommandRouter.IsValid())
 	{
 		ResponseDelegateHandle = CommandRouter->OnResponseReceived.AddRaw(this, &SGitHubCopilotUEPanel::OnResponseReceived);
@@ -79,6 +85,11 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 
 	ChildSlot
 	[
+		SNew(SBorder)
+		.BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BorderBackgroundColor(FLinearColor(0.02f, 0.02f, 0.02f, 1.0f))
+		.ForegroundColor(FLinearColor::White)
+		[
 		SNew(SVerticalBox)
 
 		// === Status Bar ===
@@ -93,6 +104,8 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 		.AutoHeight()
 		[
 			SNew(SSeparator)
+			.SeparatorImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+			.ColorAndOpacity(FLinearColor(0.15f, 0.15f, 0.15f))
 		]
 
 		// === Main content area (scrollable) ===
@@ -120,6 +133,8 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 			.Padding(2)
 			[
 				SNew(SSeparator)
+				.SeparatorImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+				.ColorAndOpacity(FLinearColor(0.15f, 0.15f, 0.15f))
 			]
 
 			// Prompt Input
@@ -155,6 +170,8 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 		.AutoHeight()
 		[
 			SNew(SSeparator)
+			.SeparatorImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+			.ColorAndOpacity(FLinearColor(0.15f, 0.15f, 0.15f))
 		]
 
 		// === Execution Log Footer ===
@@ -165,6 +182,7 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 		[
 			BuildExecutionLog()
 		]
+		] // close SBorder
 	];
 
 	// Restore chat transcript to UI if we loaded one from disk
@@ -268,6 +286,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildStatusBar()
 				SNew(STextBlock)
 				.Text(LOCTEXT("StatusLabel", "GitHub Copilot UE"))
 				.Font(FCoreStyle::GetDefaultFontStyle("Bold", 12))
+				.ColorAndOpacity(FSlateColor(FLinearColor(0.3f, 0.7f, 1.0f)))
 			]
 
 			+ SHorizontalBox::Slot()
@@ -387,6 +406,38 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildStatusBar()
 						return SelectedModelOption.IsValid()
 							? FText::FromString(*SelectedModelOption)
 							: LOCTEXT("NoModel", "Sign in to load models");
+					})
+				]
+			]
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 4, 0)
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("ReasoningLabel", "Reasoning:"))
+			]
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SAssignNew(ReasoningComboBox, SComboBox<TSharedPtr<FString>>)
+				.OptionsSource(&ReasoningOptions)
+				.OnSelectionChanged(this, &SGitHubCopilotUEPanel::OnReasoningSelected)
+				.OnGenerateWidget_Lambda([](TSharedPtr<FString> Item) -> TSharedRef<SWidget>
+				{
+					return SNew(STextBlock).Text(FText::FromString(*Item));
+				})
+				.Content()
+				[
+					SNew(STextBlock)
+					.Text_Lambda([this]() -> FText
+					{
+						return SelectedReasoningOption.IsValid()
+							? FText::FromString(*SelectedReasoningOption)
+							: LOCTEXT("DefaultReasoning", "medium");
 					})
 				]
 			]
@@ -585,6 +636,9 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 					.IsReadOnly(true)
 					.AutoWrapText(true)
 					.Font(FSlateFontInfo(TEXT("C:\\Windows\\Fonts\\consolab.ttf"), 12))
+					.BackgroundColor(FLinearColor(0.04f, 0.04f, 0.04f, 1.0f))
+					.ForegroundColor(FLinearColor::White)
+					.ReadOnlyForegroundColor(FLinearColor::White)
 					.HintText(LOCTEXT("ResponseHint", "Running dialogue appears here (UserHandle + returned Model label)..."))
 				]
 			]
@@ -607,7 +661,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 				[
 					SNew(STextBlock)
 					.Text(LOCTEXT("ThinkingIndicatorText", "Copilot is thinking..."))
-					.ColorAndOpacity(FSlateColor(FLinearColor(0.8f, 0.8f, 0.8f)))
+					.ColorAndOpacity(FSlateColor(FLinearColor(0.5f, 0.8f, 1.0f)))
 				]
 			]
 			+ SVerticalBox::Slot()
@@ -621,6 +675,8 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 					SAssignNew(PromptTextBox, SMultiLineEditableTextBox)
 					.HintText(LOCTEXT("PromptHint", "Type a prompt or / command (Enter sends, Shift+Enter adds newline)..."))
 					.AutoWrapText(true)
+					.BackgroundColor(FLinearColor(0.06f, 0.06f, 0.06f, 1.0f))
+					.ForegroundColor(FLinearColor::White)
 					.OnKeyDownHandler(FOnKeyDown::CreateLambda([this](const FGeometry&, const FKeyEvent& KeyEvent)
 					{
 						if (KeyEvent.GetKey() == EKeys::Enter && !KeyEvent.IsShiftDown())
@@ -702,6 +758,9 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildDiffPreviewArea()
 				SAssignNew(DiffPreviewTextBox, SMultiLineEditableTextBox)
 				.IsReadOnly(true)
 				.AutoWrapText(false)
+				.BackgroundColor(FLinearColor(0.04f, 0.04f, 0.04f, 1.0f))
+				.ForegroundColor(FLinearColor::White)
+				.ReadOnlyForegroundColor(FLinearColor::White)
 				.HintText(LOCTEXT("DiffHint", "Diff previews will appear here..."))
 			]
 		];
@@ -721,6 +780,9 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildExecutionLog()
 				SAssignNew(LogTextBox, SMultiLineEditableTextBox)
 				.IsReadOnly(true)
 				.AutoWrapText(true)
+				.BackgroundColor(FLinearColor(0.04f, 0.04f, 0.04f, 1.0f))
+				.ForegroundColor(FLinearColor(0.6f, 0.6f, 0.6f, 1.0f))
+				.ReadOnlyForegroundColor(FLinearColor(0.6f, 0.6f, 0.6f, 1.0f))
 			]
 		];
 }
@@ -1313,6 +1375,16 @@ void SGitHubCopilotUEPanel::OnModelSelected(TSharedPtr<FString> NewModel, ESelec
 			BridgeService->SaveTokenCache();
 			AppendToLog(FString::Printf(TEXT("Model changed to: %s"), **NewModel));
 		}
+	}
+}
+
+void SGitHubCopilotUEPanel::OnReasoningSelected(TSharedPtr<FString> NewEffort, ESelectInfo::Type SelectInfo)
+{
+	if (NewEffort.IsValid() && BridgeService.IsValid())
+	{
+		SelectedReasoningOption = NewEffort;
+		BridgeService->SetReasoningEffort(*NewEffort);
+		AppendToLog(FString::Printf(TEXT("Reasoning effort set to: %s"), **NewEffort));
 	}
 }
 

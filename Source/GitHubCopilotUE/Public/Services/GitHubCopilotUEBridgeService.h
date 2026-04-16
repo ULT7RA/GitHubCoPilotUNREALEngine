@@ -140,6 +140,12 @@ public:
 	/** Get the active model ID */
 	FString GetActiveModel() const { return ActiveModelId; }
 
+	/** Set reasoning effort level */
+	void SetReasoningEffort(const FString& Effort) { ReasoningEffort = Effort; }
+
+	/** Get current reasoning effort level */
+	FString GetReasoningEffort() const { return ReasoningEffort; }
+
 	/** Get the active model struct (or nullptr if not found) */
 	const FCopilotModel* GetActiveModelInfo() const;
 
@@ -270,6 +276,7 @@ private:
 	// Models
 	TArray<FCopilotModel> AvailableModels;
 	FString ActiveModelId;
+	FString ReasoningEffort = TEXT("medium");
 
 	// Request tracking
 	TMap<FString, double> PendingRequestTimestamps;

@@ -1587,6 +1587,13 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 		JsonBody->SetArrayField(TEXT("messages"), ConvoMessages);
 		JsonBody->SetNumberField(TEXT("temperature"), 0.1);
 
+		// Include reasoning effort if not default
+		if (!ReasoningEffort.IsEmpty() && ReasoningEffort != TEXT("medium"))
+		{
+			JsonBody->SetStringField(TEXT("reasoning_effort"), ReasoningEffort);
+			Log(FString::Printf(TEXT("BridgeService: reasoning_effort=%s"), *ReasoningEffort));
+		}
+
 		// Use configurable max output tokens — try to use the model's reported limit
 		// from /models endpoint. Fall back to settings, then 16384.
 		const UGitHubCopilotUESettings* Settings = UGitHubCopilotUESettings::Get();
