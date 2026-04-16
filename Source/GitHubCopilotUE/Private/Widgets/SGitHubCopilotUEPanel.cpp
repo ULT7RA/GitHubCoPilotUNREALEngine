@@ -30,6 +30,8 @@
 #include "InputCoreTypes.h"
 #include "IImageWrapperModule.h"
 #include "IImageWrapper.h"
+#include "Brushes/SlateColorBrush.h"
+#include "Styling/AppStyle.h"
 
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <Windows.h>
@@ -81,6 +83,36 @@ void SGitHubCopilotUEPanel::Construct(const FArguments& InArgs)
 		BridgeLogDelegateHandle = BridgeService->OnLogMessage.AddRaw(this, &SGitHubCopilotUEPanel::OnLogMessageReceived);
 		ActiveModelChangedDelegateHandle = BridgeService->OnActiveModelChanged.AddRaw(this, &SGitHubCopilotUEPanel::OnActiveModelChanged);
 		ToolActivityDelegateHandle = BridgeService->OnToolActivity.AddRaw(this, &SGitHubCopilotUEPanel::OnToolActivity);
+	}
+
+	// --- Initialize dark mode text box styles ---
+	{
+		DarkTextBoxStyle = FEditableTextBoxStyle::GetDefault();
+		DarkTextBoxStyle.SetBackgroundImageNormal(FSlateColorBrush(FLinearColor(0.04f, 0.04f, 0.04f)));
+		DarkTextBoxStyle.SetBackgroundImageHovered(FSlateColorBrush(FLinearColor(0.06f, 0.06f, 0.06f)));
+		DarkTextBoxStyle.SetBackgroundImageFocused(FSlateColorBrush(FLinearColor(0.08f, 0.08f, 0.08f)));
+		DarkTextBoxStyle.SetBackgroundImageReadOnly(FSlateColorBrush(FLinearColor(0.04f, 0.04f, 0.04f)));
+		DarkTextBoxStyle.SetForegroundColor(FSlateColor(FLinearColor::White));
+		DarkTextBoxStyle.SetReadOnlyForegroundColor(FSlateColor(FLinearColor::White));
+		DarkTextBoxStyle.SetFocusedForegroundColor(FSlateColor(FLinearColor::White));
+		DarkTextBoxStyle.SetBackgroundColor(FSlateColor(FLinearColor(0.04f, 0.04f, 0.04f)));
+		DarkTextBoxStyle.TextStyle.SetColorAndOpacity(FSlateColor(FLinearColor::White));
+		DarkTextBoxStyle.TextStyle.SetFont(FSlateFontInfo(TEXT("C:\\Windows\\Fonts\\consolab.ttf"), 12));
+
+		DarkLogTextBoxStyle = DarkTextBoxStyle;
+		DarkLogTextBoxStyle.SetForegroundColor(FSlateColor(FLinearColor(0.6f, 0.6f, 0.6f)));
+		DarkLogTextBoxStyle.SetReadOnlyForegroundColor(FSlateColor(FLinearColor(0.6f, 0.6f, 0.6f)));
+		DarkLogTextBoxStyle.TextStyle.SetColorAndOpacity(FSlateColor(FLinearColor(0.6f, 0.6f, 0.6f)));
+
+		DarkButtonStyle = FButtonStyle::GetDefault();
+		DarkButtonStyle.SetNormal(FSlateColorBrush(FLinearColor(0.12f, 0.12f, 0.12f)));
+		DarkButtonStyle.SetHovered(FSlateColorBrush(FLinearColor(0.22f, 0.22f, 0.25f)));
+		DarkButtonStyle.SetPressed(FSlateColorBrush(FLinearColor(0.06f, 0.06f, 0.06f)));
+		DarkButtonStyle.SetDisabled(FSlateColorBrush(FLinearColor(0.08f, 0.08f, 0.08f)));
+		DarkButtonStyle.SetNormalForeground(FSlateColor(FLinearColor::White));
+		DarkButtonStyle.SetHoveredForeground(FSlateColor(FLinearColor::White));
+		DarkButtonStyle.SetPressedForeground(FSlateColor(FLinearColor(0.8f, 0.8f, 0.8f)));
+		DarkButtonStyle.SetDisabledForeground(FSlateColor(FLinearColor(0.4f, 0.4f, 0.4f)));
 	}
 
 	ChildSlot
@@ -311,6 +343,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildStatusBar()
 			.Padding(4, 0)
 			[
 				SNew(SButton)
+				.ButtonStyle(&DarkButtonStyle)
 				.Text(LOCTEXT("SignInBtn", "Sign in with GitHub"))
 				.ToolTipText(LOCTEXT("SignInTip", "Authenticate with your GitHub account to use Copilot"))
 				.OnClicked_Lambda([this]() -> FReply { OnSignIn(); return FReply::Handled(); })
@@ -322,6 +355,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildStatusBar()
 			.Padding(2, 0)
 			[
 				SNew(SButton)
+				.ButtonStyle(&DarkButtonStyle)
 				.Text(LOCTEXT("SignOutBtn", "Sign Out"))
 				.OnClicked_Lambda([this]() -> FReply { OnSignOut(); return FReply::Handled(); })
 			]
@@ -332,6 +366,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildStatusBar()
 			.Padding(4, 0)
 			[
 				SNew(SButton)
+				.ButtonStyle(&DarkButtonStyle)
 				.Text(LOCTEXT("RefreshModelsBtn", "Refresh Models"))
 				.ToolTipText(LOCTEXT("RefreshModelsTip", "Reload model list from your Copilot subscription"))
 				.OnClicked_Lambda([this]() -> FReply { OnRefreshModels(); return FReply::Handled(); })
@@ -343,6 +378,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildStatusBar()
 			.Padding(4, 0)
 			[
 				SNew(SButton)
+				.ButtonStyle(&DarkButtonStyle)
 				.Text(LOCTEXT("RefreshBtn", "Refresh"))
 				.OnClicked_Lambda([this]() -> FReply { OnRefreshContext(); return FReply::Handled(); })
 			]
@@ -362,6 +398,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildStatusBar()
 			[
 				SAssignNew(AuthStatusText, STextBlock)
 				.Text(LOCTEXT("AuthNotSignedIn", "Not signed in"))
+				.ColorAndOpacity(FSlateColor(FLinearColor(0.85f, 0.85f, 0.85f)))
 			]
 
 			+ SHorizontalBox::Slot()
@@ -388,6 +425,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildStatusBar()
 			[
 				SNew(STextBlock)
 				.Text(LOCTEXT("ModelLabel", "Model:"))
+				.ColorAndOpacity(FSlateColor(FLinearColor(0.85f, 0.85f, 0.85f)))
 			]
 
 			+ SHorizontalBox::Slot()
@@ -417,6 +455,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildStatusBar()
 			[
 				SNew(STextBlock)
 				.Text(LOCTEXT("ReasoningLabel", "Reasoning:"))
+				.ColorAndOpacity(FSlateColor(FLinearColor(0.85f, 0.85f, 0.85f)))
 			]
 
 			+ SHorizontalBox::Slot()
@@ -447,6 +486,10 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildStatusBar()
 TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildProjectContextBox()
 {
 	return SNew(SExpandableArea)
+		.BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BorderBackgroundColor(FLinearColor(0.08f, 0.08f, 0.08f))
+		.BodyBorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BodyBorderBackgroundColor(FLinearColor(0.03f, 0.03f, 0.03f))
 		.AreaTitle(LOCTEXT("ProjectContext", "Project Context"))
 		.InitiallyCollapsed(false)
 		.BodyContent()
@@ -454,12 +497,17 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildProjectContextBox()
 			SAssignNew(ProjectContextText, STextBlock)
 			.Text(LOCTEXT("ProjectContextLoading", "Loading..."))
 			.AutoWrapText(true)
+			.ColorAndOpacity(FSlateColor(FLinearColor(0.85f, 0.85f, 0.85f)))
 		];
 }
 
 TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildVRContextBox()
 {
 	return SNew(SExpandableArea)
+		.BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BorderBackgroundColor(FLinearColor(0.08f, 0.08f, 0.08f))
+		.BodyBorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BodyBorderBackgroundColor(FLinearColor(0.03f, 0.03f, 0.03f))
 		.AreaTitle(LOCTEXT("VRContext", "VR / Quest Context"))
 		.InitiallyCollapsed(true)
 		.BodyContent()
@@ -467,6 +515,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildVRContextBox()
 			SAssignNew(VRContextText, STextBlock)
 			.Text(LOCTEXT("VRContextLoading", "Click 'Analyze VR Setup' to load"))
 			.AutoWrapText(true)
+			.ColorAndOpacity(FSlateColor(FLinearColor(0.85f, 0.85f, 0.85f)))
 		];
 }
 
@@ -480,6 +529,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildPromptInput()
 			SNew(STextBlock)
 			.Text(LOCTEXT("PromptLabel", "Chat Setup:"))
 			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 10))
+			.ColorAndOpacity(FSlateColor(FLinearColor(0.85f, 0.85f, 0.85f)))
 		]
 		+ SVerticalBox::Slot()
 		.AutoHeight()
@@ -512,11 +562,16 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildActionButtons()
 	auto MakeButton = [this](const FText& Label, ECopilotCommandType CmdType) -> TSharedRef<SWidget>
 	{
 		return SNew(SButton)
+			.ButtonStyle(&DarkButtonStyle)
 			.Text(Label)
 			.OnClicked_Lambda([this, CmdType]() -> FReply { OnActionButton(CmdType); return FReply::Handled(); });
 	};
 
 	return SNew(SExpandableArea)
+		.BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BorderBackgroundColor(FLinearColor(0.08f, 0.08f, 0.08f))
+		.BodyBorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BodyBorderBackgroundColor(FLinearColor(0.03f, 0.03f, 0.03f))
 		.AreaTitle(LOCTEXT("Actions", "Actions"))
 		.InitiallyCollapsed(false)
 		.BodyContent()
@@ -566,6 +621,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildActionButtons()
 				+ SHorizontalBox::Slot().AutoWidth().Padding(2, 0)
 				[
 					SNew(SButton)
+					.ButtonStyle(&DarkButtonStyle)
 					.Text(LOCTEXT("ApplyPatchBtn", "Apply Patch"))
 					.ToolTipText(LOCTEXT("ApplyPatchTip", "Approve and apply the pending diff preview"))
 					.OnClicked_Lambda([this]() -> FReply { OnApplyPatch(); return FReply::Handled(); })
@@ -573,6 +629,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildActionButtons()
 				+ SHorizontalBox::Slot().AutoWidth().Padding(2, 0)
 				[
 					SNew(SButton)
+					.ButtonStyle(&DarkButtonStyle)
 					.Text(LOCTEXT("RollbackBtn", "Rollback"))
 					.ToolTipText(LOCTEXT("RollbackTip", "Restore the last patched file from its backup"))
 					.OnClicked_Lambda([this]() -> FReply { OnRollbackPatch(); return FReply::Handled(); })
@@ -610,6 +667,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildActionButtons()
 				+ SHorizontalBox::Slot().AutoWidth().Padding(2, 0)
 				[
 					SNew(SButton)
+					.ButtonStyle(&DarkButtonStyle)
 					.Text(LOCTEXT("CopyResponseBtn", "Copy Response"))
 					.OnClicked_Lambda([this]() -> FReply { OnCopyResponse(); return FReply::Handled(); })
 				]
@@ -620,6 +678,10 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildActionButtons()
 TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 {
 	return SNew(SExpandableArea)
+		.BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BorderBackgroundColor(FLinearColor(0.08f, 0.08f, 0.08f))
+		.BodyBorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BodyBorderBackgroundColor(FLinearColor(0.03f, 0.03f, 0.03f))
 		.AreaTitle(LOCTEXT("ResponseArea", "Chat"))
 		.InitiallyCollapsed(false)
 		.BodyContent()
@@ -633,12 +695,9 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 				.MaxDesiredHeight(450.0f)
 				[
 					SAssignNew(ResponseTextBox, SMultiLineEditableTextBox)
+					.Style(&DarkTextBoxStyle)
 					.IsReadOnly(true)
 					.AutoWrapText(true)
-					.Font(FSlateFontInfo(TEXT("C:\\Windows\\Fonts\\consolab.ttf"), 12))
-					.BackgroundColor(FLinearColor(0.04f, 0.04f, 0.04f, 1.0f))
-					.ForegroundColor(FLinearColor::White)
-					.ReadOnlyForegroundColor(FLinearColor::White)
 					.HintText(LOCTEXT("ResponseHint", "Running dialogue appears here (UserHandle + returned Model label)..."))
 				]
 			]
@@ -673,10 +732,9 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 				.FillWidth(1.0f)
 				[
 					SAssignNew(PromptTextBox, SMultiLineEditableTextBox)
+					.Style(&DarkTextBoxStyle)
 					.HintText(LOCTEXT("PromptHint", "Type a prompt or / command (Enter sends, Shift+Enter adds newline)..."))
 					.AutoWrapText(true)
-					.BackgroundColor(FLinearColor(0.06f, 0.06f, 0.06f, 1.0f))
-					.ForegroundColor(FLinearColor::White)
 					.OnKeyDownHandler(FOnKeyDown::CreateLambda([this](const FGeometry&, const FKeyEvent& KeyEvent)
 					{
 						if (KeyEvent.GetKey() == EKeys::Enter && !KeyEvent.IsShiftDown())
@@ -701,6 +759,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 				.VAlign(VAlign_Bottom)
 				[
 					SNew(SButton)
+					.ButtonStyle(&DarkButtonStyle)
 					.Text(LOCTEXT("SendBtn", "Send"))
 					.OnClicked_Lambda([this]() -> FReply { OnSendPrompt(); return FReply::Handled(); })
 				]
@@ -710,6 +769,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 				.VAlign(VAlign_Bottom)
 				[
 					SNew(SButton)
+					.ButtonStyle(&DarkButtonStyle)
 					.Text(LOCTEXT("ClearBtn", "Clear"))
 					.OnClicked_Lambda([this]() -> FReply { OnClearAll(); return FReply::Handled(); })
 				]
@@ -719,6 +779,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 				.VAlign(VAlign_Bottom)
 				[
 					SNew(SButton)
+					.ButtonStyle(&DarkButtonStyle)
 					.Text(LOCTEXT("UploadBtn", "Upload"))
 					.OnClicked_Lambda([this]() -> FReply { OnUploadFiles(); return FReply::Handled(); })
 				]
@@ -728,6 +789,7 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 				.VAlign(VAlign_Bottom)
 				[
 					SNew(SButton)
+					.ButtonStyle(&DarkButtonStyle)
 					.Text(LOCTEXT("ClearUploadsBtn", "Clear Uploads"))
 					.OnClicked_Lambda([this]() -> FReply { OnClearUploads(); return FReply::Handled(); })
 				]
@@ -747,6 +809,10 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildResponseArea()
 TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildDiffPreviewArea()
 {
 	return SNew(SExpandableArea)
+		.BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BorderBackgroundColor(FLinearColor(0.08f, 0.08f, 0.08f))
+		.BodyBorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BodyBorderBackgroundColor(FLinearColor(0.03f, 0.03f, 0.03f))
 		.AreaTitle(LOCTEXT("DiffPreview", "Diff Preview"))
 		.InitiallyCollapsed(true)
 		.BodyContent()
@@ -756,11 +822,9 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildDiffPreviewArea()
 			.MaxDesiredHeight(300.0f)
 			[
 				SAssignNew(DiffPreviewTextBox, SMultiLineEditableTextBox)
+				.Style(&DarkTextBoxStyle)
 				.IsReadOnly(true)
 				.AutoWrapText(false)
-				.BackgroundColor(FLinearColor(0.04f, 0.04f, 0.04f, 1.0f))
-				.ForegroundColor(FLinearColor::White)
-				.ReadOnlyForegroundColor(FLinearColor::White)
 				.HintText(LOCTEXT("DiffHint", "Diff previews will appear here..."))
 			]
 		];
@@ -769,6 +833,10 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildDiffPreviewArea()
 TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildExecutionLog()
 {
 	return SNew(SExpandableArea)
+		.BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BorderBackgroundColor(FLinearColor(0.08f, 0.08f, 0.08f))
+		.BodyBorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
+		.BodyBorderBackgroundColor(FLinearColor(0.03f, 0.03f, 0.03f))
 		.AreaTitle(LOCTEXT("ExecLog", "Execution Log"))
 		.InitiallyCollapsed(false)
 		.Padding(FMargin(2.0f))
@@ -778,11 +846,9 @@ TSharedRef<SWidget> SGitHubCopilotUEPanel::BuildExecutionLog()
 			.MaxDesiredHeight(120.0f)
 			[
 				SAssignNew(LogTextBox, SMultiLineEditableTextBox)
+				.Style(&DarkLogTextBoxStyle)
 				.IsReadOnly(true)
 				.AutoWrapText(true)
-				.BackgroundColor(FLinearColor(0.04f, 0.04f, 0.04f, 1.0f))
-				.ForegroundColor(FLinearColor(0.6f, 0.6f, 0.6f, 1.0f))
-				.ReadOnlyForegroundColor(FLinearColor(0.6f, 0.6f, 0.6f, 1.0f))
 			]
 		];
 }

@@ -8,6 +8,7 @@
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Text/STextBlock.h"
+#include "Styling/SlateTypes.h"
 #include "Services/GitHubCopilotUETypes.h"
 
 class FGitHubCopilotUECommandRouter;
@@ -132,6 +133,11 @@ private:
 	TArray<TSharedPtr<FString>> ReasoningOptions;
 	TSharedPtr<FString> SelectedReasoningOption;
 	TSharedPtr<SComboBox<TSharedPtr<FString>>> ReasoningComboBox;
+
+	// Custom dark mode styles (must outlive the widgets that reference them)
+	FEditableTextBoxStyle DarkTextBoxStyle;
+	FEditableTextBoxStyle DarkLogTextBoxStyle;
+	FButtonStyle DarkButtonStyle;
 
 	// Delegate handles for safe unbinding on destroy
 	FDelegateHandle ResponseDelegateHandle;
