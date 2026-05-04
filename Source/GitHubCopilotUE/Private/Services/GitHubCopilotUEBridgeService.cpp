@@ -1478,7 +1478,7 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 			}
 
 			// Last resort: drop non-user messages entirely from oldest end
-			// CRITICAL: Never drop user messages — they contain the conversation context
+			// CRITICAL: Never drop user messages, and always drop tool_use+tool_result PAIRS together
 			for (int32 i = 1; i < ConvoMessages.Num() - 4 && PayloadEstimate > MaxPayloadChars; )
 			{
 				TSharedPtr<FJsonObject> Msg = ConvoMessages[i]->AsObject();
@@ -1486,16 +1486,126 @@ void FGitHubCopilotUEBridgeService::SendChatCompletion(const FCopilotRequest& Re
 				FString Role = Msg->GetStringField(TEXT("role"));
 				if (Role == TEXT("user"))
 				{
-					++i; // SKIP — never remove user messages
+					++i;
 					continue;
 				}
-				ConvoMessages.RemoveAt(i);
+
+				// If this is an assistant message with tool_calls, also remove all
+				// following tool result messages that reference those tool_call IDs
+				if (Role == TEXT("assistant") && Msg->HasField(TEXT("tool_calls")))
+				{
+					TSet<FString> ToolCallIds;
+					for (const auto& TC : Msg->GetArrayField(TEXT("tool_calls")))
+					{
+						if (TC.IsValid() && TC->AsObject().IsValid())
+							ToolCallIds.Add(TC->AsObject()->GetStringField(TEXT("id")));
+					}
+					ConvoMessages.RemoveAt(i); // Remove the assistant tool_calls message
+					// Remove all immediately following tool results for those IDs
+					while (i < ConvoMessages.Num())
+					{
+						TSharedPtr<FJsonObject> Next = ConvoMessages[i]->AsObject();
+						if (!Next.IsValid()) break;
+						FString NextRole = Next->GetStringField(TEXT("role"));
+						if (NextRole == TEXT("tool"))
+						{
+							FString CallId = Next->GetStringField(TEXT("tool_call_id"));
+							if (ToolCallIds.Contains(CallId))
+							{
+								ConvoMessages.RemoveAt(i);
+								continue;
+							}
+						}
+						break;
+					}
+				}
+				else
+				{
+					ConvoMessages.RemoveAt(i);
+				}
 				PayloadEstimate = EstimatePayloadSize(ConvoMessages);
-				// Don't increment i — next element shifted into this position
 			}
 
 			Log(FString::Printf(TEXT("BridgeService: [PRUNE] Trimmed to %d messages (%d chars)"),
 				ConvoMessages.Num(), PayloadEstimate));
+		}
+
+		// ── VALIDATION: Ensure every tool_use has a matching tool_result ──
+		// Claude/Copilot API rejects conversations where tool_use blocks lack
+		// corresponding tool_result messages. Fix any orphans from pruning.
+		for (int32 i = 0; i < ConvoMessages.Num(); ++i)
+		{
+			TSharedPtr<FJsonObject> Msg = ConvoMessages[i]->AsObject();
+			if (!Msg.IsValid()) continue;
+			FString Role = Msg->GetStringField(TEXT("role"));
+
+			if (Role == TEXT("assistant") && Msg->HasField(TEXT("tool_calls")))
+			{
+				TSet<FString> NeededIds;
+				for (const auto& TC : Msg->GetArrayField(TEXT("tool_calls")))
+				{
+					if (TC.IsValid() && TC->AsObject().IsValid())
+						NeededIds.Add(TC->AsObject()->GetStringField(TEXT("id")));
+				}
+
+				// Scan following messages for matching tool results
+				TSet<FString> FoundIds;
+				int32 InsertAt = i + 1;
+				for (int32 j = i + 1; j < ConvoMessages.Num(); ++j)
+				{
+					TSharedPtr<FJsonObject> Next = ConvoMessages[j]->AsObject();
+					if (!Next.IsValid()) break;
+					FString NextRole = Next->GetStringField(TEXT("role"));
+					if (NextRole == TEXT("tool"))
+					{
+						FString CallId = Next->GetStringField(TEXT("tool_call_id"));
+						if (NeededIds.Contains(CallId))
+							FoundIds.Add(CallId);
+						InsertAt = j + 1;
+					}
+					else
+					{
+						break;
+					}
+				}
+
+				// Insert dummy results for any missing tool_call IDs
+				TSet<FString> MissingIds = NeededIds.Difference(FoundIds);
+				for (const FString& MissingId : MissingIds)
+				{
+					TSharedPtr<FJsonObject> DummyResult = MakeShareable(new FJsonObject);
+					DummyResult->SetStringField(TEXT("role"), TEXT("tool"));
+					DummyResult->SetStringField(TEXT("tool_call_id"), MissingId);
+					DummyResult->SetStringField(TEXT("content"), TEXT("[result unavailable]"));
+					ConvoMessages.Insert(MakeShareable(new FJsonValueObject(DummyResult)), InsertAt);
+					Log(FString::Printf(TEXT("BridgeService: [VALIDATE] Inserted missing tool_result for %s"), *MissingId));
+					++InsertAt;
+				}
+			}
+			else if (Role == TEXT("tool"))
+			{
+				// Orphaned tool result — no preceding assistant tool_calls
+				// Check if the previous message is an assistant with matching tool_calls
+				bool bHasParent = false;
+				if (i > 0)
+				{
+					TSharedPtr<FJsonObject> Prev = ConvoMessages[i - 1]->AsObject();
+					if (Prev.IsValid())
+					{
+						FString PrevRole = Prev->GetStringField(TEXT("role"));
+						if ((PrevRole == TEXT("assistant") && Prev->HasField(TEXT("tool_calls"))) || PrevRole == TEXT("tool"))
+						{
+							bHasParent = true;
+						}
+					}
+				}
+				if (!bHasParent)
+				{
+					ConvoMessages.RemoveAt(i);
+					--i; // Re-check this index
+					Log(TEXT("BridgeService: [VALIDATE] Removed orphaned tool_result message"));
+				}
+			}
 		}
 	}
 
